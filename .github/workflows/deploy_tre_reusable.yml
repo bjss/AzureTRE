@@ -61,6 +61,18 @@ on: # yamllint disable-line rule:truthy
         default: false
         required: false
     secrets:
+      CI_NAMESPACE:
+        required: false
+      CI_DEPLOYMENTS_ENABLED:
+        required: false
+      CI_CLEANUP_ENABLED:
+        required: false
+      CI_MAIN_ENABLED:
+        required: false
+      LOCATION:
+        required: false
+      AZURE_ENVIRONMENT:
+        required: false
       AAD_TENANT_ID:
         description: ""
         required: true
@@ -137,40 +149,38 @@ concurrency:
 
 env:
   CI_ENVIRONMENT_ID: ${{ inputs.ciEnvironmentId }}
-  CI_NAMESPACE: ${{ vars.CI_NAMESPACE }}
 
 jobs:
   ci_config:
     name: Resolve CI configuration
-    if: ${{ (vars.CI_NAMESPACE == '' || vars.CI_DEPLOYMENTS_ENABLED == 'true') && (inputs.ciGitRef != 'refs/heads/main' || vars.CI_NAMESPACE == '' || vars.CI_MAIN_ENABLED == 'true') }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environmentName }}
     permissions:
       contents: read
     outputs:
-      tre_id: ${{ steps.names.outputs.tre_id }}
-      acr_name: ${{ steps.names.outputs.acr_name }}
-      mgmt_resource_group_name: ${{ steps.names.outputs.mgmt_resource_group_name }}
-      mgmt_storage_account_name: ${{ steps.names.outputs.mgmt_storage_account_name }}
-      encryption_kv_name: ${{ steps.names.outputs.encryption_kv_name }}
-      devcontainer_tag: ${{ steps.names.outputs.devcontainer_tag }}
+      deployment: ${{ steps.scope.outputs.deployment }}
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+      CI_DEPLOYMENTS_ENABLED: ${{ secrets.CI_DEPLOYMENTS_ENABLED }}
+      CI_CLEANUP_ENABLED: ${{ secrets.CI_CLEANUP_ENABLED }}
+      CI_MAIN_ENABLED: ${{ secrets.CI_MAIN_ENABLED }}
     steps:
       - name: Checkout configuration code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-      - name: Resolve names
-        id: names
+      - name: Read CI activation settings
+        id: scope
         env:
           CI_GIT_REF: ${{ inputs.ciGitRef }}
-          CI_LOCATION: ${{ vars.LOCATION }}
-          CI_AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT || 'AzureCloud' }}
-        run: python3 devops/scripts/ci_repository_scope.py resolve
+        run: python3 devops/scripts/ci_repository_scope.py prepare --purpose deployment
 
   deploy_management:
     needs: [ci_config]
     name: Deploy Management
-    if: ${{ !inputs.skipDeployment }}
+    if: ${{ !inputs.skipDeployment && needs.ci_config.outputs.deployment == 'allowed' }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -178,7 +188,24 @@ jobs:
       contents: read
       actions: read # For bootstrap lease recovery ownership checks
     environment: ${{ inputs.environmentName }}
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+          # if the following values are missing (i.e. not triggered via comment workflow)
+          # then the default checkout will apply
+          ref: ${{ inputs.prRef }}
+
+      - name: Resolve and mask CI names
+        env:
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
+        run: python3 devops/scripts/ci_repository_scope.py resolve
+
       - name: Show inputs
         run: |
           echo "Inputs"
@@ -195,7 +222,7 @@ jobs:
           if [ "${{ secrets.AAD_TENANT_ID }}" == '' ]; then
             echo "Missing secret: AAD_TENANT_ID" && exit 1
           fi
-          if [ "${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}" == '' ]; then
+          if [ "${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}" == '' ]; then
             echo "Missing secret: ACR_NAME" && exit 1
           fi
           if [ "${{ secrets.API_CLIENT_ID }}" == '' ]; then
@@ -210,10 +237,10 @@ jobs:
           if [ "${{ secrets.APPLICATION_ADMIN_CLIENT_SECRET }}" == '' ]; then
             echo "Missing secret: APPLICATION_ADMIN_CLIENT_SECRET" && exit 1
           fi
-          if [ "${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}" == '' ]; then
+          if [ "${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}" == '' ]; then
             echo "Missing secret: MGMT_RESOURCE_GROUP_NAME" && exit 1
           fi
-          if [ "${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}" == '' ]; then
+          if [ "${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}" == '' ]; then
             echo "Missing secret: MGMT_STORAGE_ACCOUNT_NAME" && exit 1
           fi
           if [ "${{ secrets.SWAGGER_UI_CLIENT_ID }}" == '' ]; then
@@ -234,7 +261,7 @@ jobs:
           if [ "${{ secrets.TEST_ACCOUNT_CLIENT_SECRET }}" == '' ]; then
             echo "Missing secret: TEST_ACCOUNT_CLIENT_SECRET" && exit 1
           fi
-          if [ "${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}" == '' ]; then
+          if [ "${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}" == '' ]; then
             echo "Missing secret: TRE_ID" && exit 1
           fi
           if [ "${{ secrets.AZURE_CLIENT_ID }}" == '' ]; then
@@ -247,15 +274,15 @@ jobs:
             echo "Missing secret: AZURE_SUBSCRIPTION_ID" && exit 1
           fi
 
-          if [ "${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}" == '' ]; then
+          if [ "${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}" == '' ]; then
             echo "Missing input: DEVCONTAINER_TAG" && exit 1
           fi
 
-          if [ "${{ vars.LOCATION }}" == '' ]; then
-            echo "Missing variable: LOCATION" && exit 1
+          if [ "${{ env.CI_LOCATION }}" == '' ]; then
+            echo "Missing configuration: LOCATION" && exit 1
           fi
 
-          if [ "${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}" == '' ]; then
+          if [ "${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}" == '' ]; then
             echo "CI_CACHE_ACR_NAME is not set. Please run the workflow on the main branch first." && exit 1
           fi
 
@@ -269,14 +296,6 @@ jobs:
           status: "in_progress"
           details_url: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
 
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          persist-credentials: false
-          # if the following values are missing (i.e. not triggered via comment workflow)
-          # then the default checkout will apply
-          ref: ${{ inputs.prRef }}
-
       - name: Set up Docker BuildKit
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
@@ -286,13 +305,13 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          environment: ${{ (vars.AZURE_ENVIRONMENT != '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+          environment: ${{ env.CI_AZURE_ENVIRONMENT }}
 
       - name: ACR Login
         id: ci_cache_acr_login
         # will fail if this is a new env which is expected
         continue-on-error: true
-        run: az acr login --name "${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}"
+        run: az acr login --name "${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}"
 
       - name: Build new devcontainer
         env:
@@ -303,41 +322,41 @@ jobs:
           USER_UID=$(id -u)
           USER_GID=$(id -g)
           acr_domain_suffix=$(az cloud show --query suffixes.acrLoginServerEndpoint --output tsv)
-          CI_CACHE_ACR_URI=${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}${acr_domain_suffix}
+          CI_CACHE_ACR_URI=${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}${acr_domain_suffix}
           echo "CI_CACHE_ACR_URI=$CI_CACHE_ACR_URI" >> "$GITHUB_ENV"
 
           docker_cache=()
           if [ "${{ steps.ci_cache_acr_login.outcome }}" = "success" ]; then
-            docker_cache+=(--cache-from "$CI_CACHE_ACR_URI/tredev:${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}")
+            docker_cache+=(--cache-from "$CI_CACHE_ACR_URI/tredev:${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}")
             docker_cache+=(--cache-from "$CI_CACHE_ACR_URI/tredev:latest")
           fi
 
           docker build . "${docker_cache[@]}" \
-            -t "tredev:${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}" -f ".devcontainer/Dockerfile" \
+            -t "tredev:${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}" -f ".devcontainer/Dockerfile" \
             --build-arg BUILDKIT_INLINE_CACHE=1 --build-arg USER_UID="${USER_UID}" --build-arg USER_GID="${USER_GID}"
 
-          docker image tag tredev:"${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}" \
-            "$CI_CACHE_ACR_URI/tredev:${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}"
+          docker image tag tredev:"${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}" \
+            "$CI_CACHE_ACR_URI/tredev:${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}"
 
       - name: Deploy management
         uses: ./.github/actions/devcontainer_run_command
         with:
           CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "make bootstrap mgmt-deploy"
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
-          LOCATION: ${{ vars.LOCATION }}
-          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
+          TRE_ID: ${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}
+          LOCATION: ${{ env.CI_LOCATION }}
+          ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
           TERRAFORM_STATE_CONTAINER_NAME: ${{ vars.TERRAFORM_STATE_CONTAINER_NAME }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}
           ENABLE_CMK_ENCRYPTION: ${{ vars.ENABLE_CMK_ENCRYPTION }}
-          ENCRYPTION_KV_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ENCRYPTION_KV_NAME || needs.ci_config.outputs.encryption_kv_name }}
+          ENCRYPTION_KV_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ENCRYPTION_KV_NAME || env.CI_ENCRYPTION_KV_NAME }}
           EXTERNAL_KEY_STORE_ID: ${{ secrets.EXTERNAL_KEY_STORE_ID }}
           PRIVATE_AGENT_SUBNET_ID: ${{ secrets.PRIVATE_AGENT_SUBNET_ID }}
 
@@ -347,7 +366,7 @@ jobs:
         run: |
           # shellcheck disable=SC2034,SC2015,SC2125
           for i in {1..3}; do
-            az acr login --name "${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}" && ec=0 && break || ec="$?" && sleep 10
+            az acr login --name "${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}" && ec=0 && break || ec="$?" && sleep 10
           done
           if [ "$ec" != 0 ]; then
             echo "::error::Failed to login to ACR after 3 attempts. Make sure to run the pipleline on the main branch first."
@@ -356,7 +375,7 @@ jobs:
           (exit "$ec")
 
       - name: Push cached devcontainer
-        run: docker image push ${{ env.CI_CACHE_ACR_URI }}/tredev:${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
+        run: docker image push ${{ env.CI_CACHE_ACR_URI }}/tredev:${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}
 
   build_core_images:
     # used to build images used by core infrastructure
@@ -374,6 +393,10 @@ jobs:
             build-and-push-airlock-processor,
           ]
 
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -383,27 +406,36 @@ jobs:
           # then the default checkout will apply
           ref: ${{ inputs.prRef }}
 
+      - name: Resolve and mask CI names
+        env:
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
+        run: python3 devops/scripts/ci_repository_scope.py resolve
+
       - name: Docker build
         uses: ./.github/actions/devcontainer_run_command
         with:
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
-          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}
+          TRE_ID: ${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}
           CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "make ${{ matrix.target }}"
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
+          ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
 
   start_tre:
     name: Start TRE
     runs-on: ubuntu-latest
     needs: [ci_config, deploy_management]
     environment: ${{ inputs.environmentName }}
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -413,27 +445,36 @@ jobs:
           # then the default checkout will apply
           ref: ${{ inputs.prRef }}
 
+      - name: Resolve and mask CI names
+        env:
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
+        run: python3 devops/scripts/ci_repository_scope.py resolve
+
       - name: Start TRE
         uses: ./.github/actions/devcontainer_run_command
         with:
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
-          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}
+          ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
           CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "make tre-start"
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
+          TRE_ID: ${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}
 
   deploy_tre:
     name: Deploy TRE
     runs-on: ubuntu-latest
     needs: [ci_config, build_core_images, start_tre]
     environment: ${{ inputs.environmentName }}
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -443,25 +484,30 @@ jobs:
           # then the default checkout will apply
           ref: ${{ inputs.prRef }}
 
+      - name: Resolve and mask CI names
+        env:
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
+        run: python3 devops/scripts/ci_repository_scope.py resolve
+
       - name: Deploy TRE Core
         uses: ./.github/actions/devcontainer_run_command
         with:
           CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "TF_VAR_ci_git_ref=${{ inputs.ciGitRef }} TF_LOG=${{ vars.TF_LOG }} make deploy-core"
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
           API_CLIENT_ID: "${{ secrets.API_CLIENT_ID }}"
           AAD_TENANT_ID: "${{ secrets.AAD_TENANT_ID }}"
-          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
-          LOCATION: ${{ vars.LOCATION }}
-          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          TRE_ID: ${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}
+          LOCATION: ${{ env.CI_LOCATION }}
+          ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
           TERRAFORM_STATE_CONTAINER_NAME: ${{ vars.TERRAFORM_STATE_CONTAINER_NAME }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}
           CORE_ADDRESS_SPACE: ${{ vars.CORE_ADDRESS_SPACE }}
           TRE_ADDRESS_SPACE: ${{ vars.TRE_ADDRESS_SPACE }}
           ENABLE_SWAGGER: ${{ vars.ENABLE_SWAGGER }}
@@ -478,7 +524,7 @@ jobs:
           FIREWALL_SKU: ${{ vars.FIREWALL_SKU}}
           APP_GATEWAY_SKU: ${{ vars.APP_GATEWAY_SKU }}
           ENABLE_CMK_ENCRYPTION: ${{ vars.ENABLE_CMK_ENCRYPTION }}
-          ENCRYPTION_KV_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ENCRYPTION_KV_NAME || needs.ci_config.outputs.encryption_kv_name }}
+          ENCRYPTION_KV_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ENCRYPTION_KV_NAME || env.CI_ENCRYPTION_KV_NAME }}
           EXTERNAL_KEY_STORE_ID: ${{ secrets.EXTERNAL_KEY_STORE_ID }}
           USER_MANAGEMENT_ENABLED: ${{ vars.USER_MANAGEMENT_ENABLED }}
           PRIVATE_AGENT_SUBNET_ID: ${{ secrets.PRIVATE_AGENT_SUBNET_ID }}
@@ -490,19 +536,19 @@ jobs:
       - name: API Healthcheck
         uses: ./.github/actions/devcontainer_run_command
         with:
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
-          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}
+          ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
           CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "make api-healthcheck"
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
-          LOCATION: ${{ vars.LOCATION }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
+          TRE_ID: ${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}
+          LOCATION: ${{ env.CI_LOCATION }}
 
   publish_bundles:
     name: Publish Bundles
@@ -544,6 +590,10 @@ jobs:
           - BUNDLE_TYPE: "user_resource"
             BUNDLE_DIR: "./templates/workspace_services/guacamole/user_resources/guacamole-azure-import-reviewvm"
     environment: ${{ inputs.environmentName }}
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -553,12 +603,17 @@ jobs:
           # then the default checkout will apply
           ref: ${{ inputs.prRef }}
 
+      - name: Resolve and mask CI names
+        env:
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
+        run: python3 devops/scripts/ci_repository_scope.py resolve
+
       - name: Publish bundle
         uses: ./.github/actions/devcontainer_run_command
         with:
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
-          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}
+          TRE_ID: ${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}
           CI_GIT_REF: ${{ inputs.ciGitRef }}
           # Although porter publish will build automatically, our makefile build target includes logic that should run
           COMMAND: |
@@ -569,13 +624,13 @@ jobs:
 
             # Exit with the last status code
             (exit \$ec)
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
-          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}
+          ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
 
   publish_shared_bundles:
     name: Publish Shared Bundles
@@ -601,6 +656,10 @@ jobs:
           - BUNDLE_TYPE: "shared_service"
             BUNDLE_DIR: "./templates/shared_services/databricks-auth/"
     environment: ${{ inputs.environmentName }}
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -610,12 +669,17 @@ jobs:
           # then the default checkout will apply
           ref: ${{ inputs.prRef }}
 
+      - name: Resolve and mask CI names
+        env:
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
+        run: python3 devops/scripts/ci_repository_scope.py resolve
+
       - name: Publish bundle
         uses: ./.github/actions/devcontainer_run_command
         with:
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
-          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}
+          TRE_ID: ${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}
           CI_GIT_REF: ${{ inputs.ciGitRef }}
           # Although porter publish will build automatically, our makefile build target includes logic that should run
           COMMAND: |
@@ -626,13 +690,13 @@ jobs:
 
             # Exit with the last status code
             (exit \$ec)
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
-          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}
+          ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
 
   register_shared_bundles:
     name: Register Shared Bundles
@@ -658,6 +722,10 @@ jobs:
           - BUNDLE_TYPE: "shared_service"
             BUNDLE_DIR: "./templates/shared_services/databricks-auth/"
     environment: ${{ inputs.environmentName }}
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -666,11 +734,16 @@ jobs:
           # if the following values are missing (i.e. not triggered via comment workflow)
           # then the default checkout will apply
           ref: ${{ inputs.prRef }}
+      - name: Resolve and mask CI names
+        env:
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
+        run: python3 devops/scripts/ci_repository_scope.py resolve
+
       - name: Register bundle
         uses: ./.github/actions/devcontainer_run_command
         with:
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}
           CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: |
             # Loop to retry the make command up to 3 times
@@ -680,20 +753,20 @@ jobs:
 
             # Exit with the last status code
             (exit \$ec)
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
+          ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
           API_CLIENT_ID: "${{ secrets.API_CLIENT_ID }}"
           AAD_TENANT_ID: "${{ secrets.AAD_TENANT_ID }}"
           TEST_APP_ID: "${{ secrets.TEST_APP_ID }}"
           TEST_ACCOUNT_CLIENT_ID: "${{ secrets.TEST_ACCOUNT_CLIENT_ID }}"
           TEST_ACCOUNT_CLIENT_SECRET: "${{ secrets.TEST_ACCOUNT_CLIENT_SECRET }}"
-          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
-          LOCATION: ${{ vars.LOCATION }}
+          TRE_ID: ${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}
+          LOCATION: ${{ env.CI_LOCATION }}
           BUNDLE_TYPE: ${{ matrix.BUNDLE_TYPE }}
 
   register_bundles:
@@ -728,6 +801,10 @@ jobs:
             BUNDLE_DIR: "./templates/workspace_services/azuresql"
 
     environment: ${{ inputs.environmentName }}
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -736,11 +813,16 @@ jobs:
           # if the following values are missing (i.e. not triggered via comment workflow)
           # then the default checkout will apply
           ref: ${{ inputs.prRef }}
+      - name: Resolve and mask CI names
+        env:
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
+        run: python3 devops/scripts/ci_repository_scope.py resolve
+
       - name: Register bundle
         uses: ./.github/actions/devcontainer_run_command
         with:
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}
           CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: |
             # Loop to retry the make command up to 3 times
@@ -750,20 +832,20 @@ jobs:
 
             # Exit with the last status code
             (exit \$ec)
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
+          ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
           API_CLIENT_ID: "${{ secrets.API_CLIENT_ID }}"
           AAD_TENANT_ID: "${{ secrets.AAD_TENANT_ID }}"
           TEST_APP_ID: "${{ secrets.TEST_APP_ID }}"
           TEST_ACCOUNT_CLIENT_ID: "${{ secrets.TEST_ACCOUNT_CLIENT_ID }}"
           TEST_ACCOUNT_CLIENT_SECRET: "${{ secrets.TEST_ACCOUNT_CLIENT_SECRET }}"
-          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
-          LOCATION: ${{ vars.LOCATION }}
+          TRE_ID: ${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}
+          LOCATION: ${{ env.CI_LOCATION }}
           BUNDLE_TYPE: ${{ matrix.BUNDLE_TYPE }}
 
   register_user_resource_bundles:
@@ -787,6 +869,10 @@ jobs:
             BUNDLE_DIR: "./templates/workspace_services/guacamole/user_resources/guacamole-azure-import-reviewvm"
             WORKSPACE_SERVICE_NAME: "tre-service-guacamole"
     environment: ${{ inputs.environmentName }}
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -795,11 +881,16 @@ jobs:
           # if the following values are missing (i.e. not triggered via comment workflow)
           # then the default checkout will apply
           ref: ${{ inputs.prRef }}
+      - name: Resolve and mask CI names
+        env:
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
+        run: python3 devops/scripts/ci_repository_scope.py resolve
+
       - name: Register bundle
         uses: ./.github/actions/devcontainer_run_command
         with:
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}
           CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: |
             # Loop to retry the make command up to 3 times
@@ -809,20 +900,20 @@ jobs:
 
             # Exit with the last status code
             (exit \$ec)
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
+          ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
           API_CLIENT_ID: "${{ secrets.API_CLIENT_ID }}"
           AAD_TENANT_ID: "${{ secrets.AAD_TENANT_ID }}"
           TEST_APP_ID: "${{ secrets.TEST_APP_ID }}"
           TEST_ACCOUNT_CLIENT_ID: "${{ secrets.TEST_ACCOUNT_CLIENT_ID }}"
           TEST_ACCOUNT_CLIENT_SECRET: "${{ secrets.TEST_ACCOUNT_CLIENT_SECRET }}"
-          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
-          LOCATION: ${{ vars.LOCATION }}
+          TRE_ID: ${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}
+          LOCATION: ${{ env.CI_LOCATION }}
           BUNDLE_TYPE: ${{ matrix.BUNDLE_TYPE }}
           WORKSPACE_SERVICE_NAME: ${{ matrix.WORKSPACE_SERVICE_NAME }}
 
@@ -831,6 +922,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: [ci_config, register_shared_bundles, deploy_tre]
     environment: ${{ inputs.environmentName }}
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -840,56 +935,65 @@ jobs:
           # then the default checkout will apply
           ref: ${{ inputs.prRef }}
 
+      - name: Resolve and mask CI names
+        env:
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
+        run: python3 devops/scripts/ci_repository_scope.py resolve
+
       - name: Deploy firewall
         uses: ./.github/actions/devcontainer_run_command
         with:
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
-          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}
+          ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
           CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "make deploy-shared-service DIR=./templates/shared_services/firewall/ BUNDLE_TYPE=shared_service"
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
           API_CLIENT_ID: "${{ secrets.API_CLIENT_ID }}"
           AAD_TENANT_ID: "${{ secrets.AAD_TENANT_ID }}"
           TEST_APP_ID: "${{ secrets.TEST_APP_ID }}"
           TEST_ACCOUNT_CLIENT_ID: "${{ secrets.TEST_ACCOUNT_CLIENT_ID }}"
           TEST_ACCOUNT_CLIENT_SECRET: "${{ secrets.TEST_ACCOUNT_CLIENT_SECRET }}"
-          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
-          LOCATION: ${{ vars.LOCATION }}
+          TRE_ID: ${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}
+          LOCATION: ${{ env.CI_LOCATION }}
 
       - name: State Store Migrations
         uses: ./.github/actions/devcontainer_run_command
         with:
-          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
           CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "make db-migrate"
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
           API_CLIENT_ID: "${{ secrets.API_CLIENT_ID }}"
           AAD_TENANT_ID: "${{ secrets.AAD_TENANT_ID }}"
           TEST_APP_ID: "${{ secrets.TEST_APP_ID }}"
           TEST_ACCOUNT_CLIENT_ID: "${{ secrets.TEST_ACCOUNT_CLIENT_ID }}"
           TEST_ACCOUNT_CLIENT_SECRET: "${{ secrets.TEST_ACCOUNT_CLIENT_SECRET }}"
-          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
-          LOCATION: ${{ vars.LOCATION }}
+          TRE_ID: ${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}
+          LOCATION: ${{ env.CI_LOCATION }}
           TERRAFORM_STATE_CONTAINER_NAME: ${{ vars.TERRAFORM_STATE_CONTAINER_NAME }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}
 
   deploy_ui:
     name: Deploy UI
     runs-on: ubuntu-latest
     needs: [ci_config, deploy_tre]
     environment: ${{ inputs.environmentName }}
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -898,25 +1002,30 @@ jobs:
           # if the following values are missing (i.e. not triggered via comment workflow)
           # then the default checkout will apply
           ref: ${{ inputs.prRef }}
+      - name: Resolve and mask CI names
+        env:
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
+        run: python3 devops/scripts/ci_repository_scope.py resolve
+
       - name: Deploy UI
         uses: ./.github/actions/devcontainer_run_command
         with:
-          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
           CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "make build-and-deploy-ui"
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
           API_CLIENT_ID: "${{ secrets.API_CLIENT_ID }}"
           AAD_TENANT_ID: "${{ secrets.AAD_TENANT_ID }}"
-          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
-          LOCATION: ${{ vars.LOCATION }}
+          TRE_ID: ${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}
+          LOCATION: ${{ env.CI_LOCATION }}
           TERRAFORM_STATE_CONTAINER_NAME: ${{ vars.TERRAFORM_STATE_CONTAINER_NAME }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}
           SWAGGER_UI_CLIENT_ID: "${{ secrets.SWAGGER_UI_CLIENT_ID }}"
           USER_MANAGEMENT_ENABLED: ${{ vars.USER_MANAGEMENT_ENABLED }}
           UI_SITE_NAME: "${{ inputs.UI_SITE_NAME || vars.UI_SITE_NAME }}"
@@ -927,7 +1036,7 @@ jobs:
     # When skipDeployment is true, the deploy jobs in needs are intentionally skipped.
     # always() lets this job still evaluate its guard and run against the existing PR environment.
     if: >-
-      ${{ always() && needs.ci_config.result == 'success' &&
+      ${{ always() && needs.ci_config.result == 'success' && needs.ci_config.outputs.deployment == 'allowed' &&
       (inputs.skipDeployment || !contains(needs.*.result, 'skipped')) &&
       !contains(needs.*.result, 'failure') &&
       !contains(needs.*.result, 'cancelled') }}
@@ -935,6 +1044,10 @@ jobs:
     environment: ${{ inputs.environmentName }}
     needs: [ci_config, deploy_shared_services, register_bundles, deploy_ui]
     timeout-minutes: 10
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -944,21 +1057,26 @@ jobs:
           # then the default checkout will apply
           ref: ${{ inputs.prRef }}
 
+      - name: Resolve and mask CI names
+        env:
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
+        run: python3 devops/scripts/ci_repository_scope.py resolve
+
       - name: Run E2E Tests (Smoke)
         uses: ./.github/actions/devcontainer_run_command
         with:
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
-          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}
+          ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
           CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "make test-e2e-smoke"
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          LOCATION: ${{ vars.LOCATION }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
+          LOCATION: ${{ env.CI_LOCATION }}
           API_CLIENT_ID: "${{ secrets.API_CLIENT_ID }}"
           AAD_TENANT_ID: "${{ secrets.AAD_TENANT_ID }}"
           TEST_APP_ID: "${{ secrets.TEST_APP_ID }}"
@@ -966,7 +1084,7 @@ jobs:
           TEST_WORKSPACE_APP_SECRET: "${{ secrets.TEST_WORKSPACE_APP_SECRET }}"
           TEST_ACCOUNT_CLIENT_ID: "${{ secrets.TEST_ACCOUNT_CLIENT_ID }}"
           TEST_ACCOUNT_CLIENT_SECRET: "${{ secrets.TEST_ACCOUNT_CLIENT_SECRET }}"
-          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
+          TRE_ID: ${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}
           IS_API_SECURED: false
           WORKSPACE_APP_SERVICE_PLAN_SKU: ${{ vars.WORKSPACE_APP_SERVICE_PLAN_SKU }}
 
@@ -981,7 +1099,7 @@ jobs:
     name: "Run E2E Tests"
     # Same as smoke tests: skipDeployment intentionally bypasses deploy jobs but still runs E2E tests.
     if: >-
-      ${{ always() && needs.ci_config.result == 'success' && inputs.e2eTestsCustomSelector != '' &&
+      ${{ always() && needs.ci_config.result == 'success' && needs.ci_config.outputs.deployment == 'allowed' && inputs.e2eTestsCustomSelector != '' &&
       (inputs.skipDeployment || !contains(needs.*.result, 'skipped')) &&
       !contains(needs.*.result, 'failure') &&
       !contains(needs.*.result, 'cancelled') }}
@@ -990,6 +1108,10 @@ jobs:
     needs:
       [ci_config, deploy_shared_services, register_bundles, register_user_resource_bundles]
     timeout-minutes: 300
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -999,21 +1121,26 @@ jobs:
           # then the default checkout will apply
           ref: ${{ inputs.prRef }}
 
+      - name: Resolve and mask CI names
+        env:
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
+        run: python3 devops/scripts/ci_repository_scope.py resolve
+
       - name: Run E2E Tests
         uses: ./.github/actions/devcontainer_run_command
         with:
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
-          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}
+          ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
           CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "TEST_ACCEPT_NEXUS_EULA=${{ inputs.acceptNexusEula }} make test-e2e-custom SELECTOR='${{ inputs.e2eTestsCustomSelector }}'"
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || env.CI_DEVCONTAINER_TAG }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || env.CI_ACR_NAME }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          LOCATION: ${{ vars.LOCATION }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
+          LOCATION: ${{ env.CI_LOCATION }}
           API_CLIENT_ID: "${{ secrets.API_CLIENT_ID }}"
           AAD_TENANT_ID: "${{ secrets.AAD_TENANT_ID }}"
           TEST_APP_ID: "${{ secrets.TEST_APP_ID }}"
@@ -1021,7 +1148,7 @@ jobs:
           TEST_WORKSPACE_APP_SECRET: "${{ secrets.TEST_WORKSPACE_APP_SECRET }}"
           TEST_ACCOUNT_CLIENT_ID: "${{ secrets.TEST_ACCOUNT_CLIENT_ID }}"
           TEST_ACCOUNT_CLIENT_SECRET: "${{ secrets.TEST_ACCOUNT_CLIENT_SECRET }}"
-          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
+          TRE_ID: ${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}
           IS_API_SECURED: false
           WORKSPACE_APP_SERVICE_PLAN_SKU: ${{ vars.WORKSPACE_APP_SERVICE_PLAN_SKU }}
           E2E_TESTS_NUMBER_PROCESSES: ${{ inputs.E2E_TESTS_NUMBER_PROCESSES }}
@@ -1040,9 +1167,22 @@ jobs:
     permissions:
       checks: write
       contents: read
-    if: always()
+    if: always() && needs.ci_config.outputs.deployment == 'allowed'
     environment: ${{ inputs.environmentName }}
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
     steps:
+      - name: Checkout configuration code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Resolve and mask CI names
+        env:
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
+        run: python3 devops/scripts/ci_repository_scope.py resolve
+
       - uses: im-open/workflow-conclusion@fce18569e28a9f2ed1feca1e6d4251e6a7365fdc # v2.2.4
         id: conclusion
         with:

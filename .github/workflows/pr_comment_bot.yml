@@ -10,9 +10,6 @@ on: # yamllint disable-line rule:truthy
 permissions:
   contents: read
 
-env:
-  CI_NAMESPACE: ${{ vars.CI_NAMESPACE }}
-
 jobs:
   pr_comment:
     name: PR comment
@@ -79,7 +76,7 @@ jobs:
 
   destroy_pr_env:
     needs: [pr_comment]
-    if: ${{ (vars.CI_NAMESPACE == '' || vars.CI_CLEANUP_ENABLED == 'true') && (needs.pr_comment.outputs.command == 'test-destroy-env') }}
+    if: ${{ (needs.pr_comment.outputs.command == 'test-destroy-env') }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -91,6 +88,13 @@ jobs:
       group: deploy-${{ needs.pr_comment.outputs.ciGitRef }}
       cancel-in-progress: false
       queue: max
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+      CI_DEPLOYMENTS_ENABLED: ${{ secrets.CI_DEPLOYMENTS_ENABLED }}
+      CI_CLEANUP_ENABLED: ${{ secrets.CI_CLEANUP_ENABLED }}
+      CI_MAIN_ENABLED: ${{ secrets.CI_MAIN_ENABLED }}
     steps:
       # Ensure we have the script files
       - name: Checkout
@@ -98,16 +102,22 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Read CI activation settings
+        id: scope
+        run: python3 devops/scripts/ci_repository_scope.py prepare --purpose cleanup
+
       # Perform az login for destroy env script to be able to run
       - name: Azure Login
+        if: steps.scope.outputs.cleanup == 'allowed'
         uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          environment: ${{ (vars.AZURE_ENVIRONMENT != '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+          environment: ${{ env.CI_AZURE_ENVIRONMENT }}
 
       - name: Run deployment cleanup
+        if: steps.scope.outputs.cleanup == 'allowed'
         env:
           PR_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.event.repository.full_name }}
@@ -118,13 +128,14 @@ jobs:
           SHOW_KEYVAULT_DEBUG_ON_DESTROY: ${{ secrets.SHOW_KEYVAULT_DEBUG_ON_DESTROY }}
         run: |
           set -e
+          python3 devops/scripts/ci_repository_scope.py mask-inventory
           gh pr comment "${PR_NUMBER}" --repo "$REPO" --body "Destroying PR test environments for ${CI_GIT_REF}... (run: https://github.com/${REPO}/actions/runs/${RUN_ID})"
           python3 devops/scripts/destroy_ci_ref_env.py --ref "$CI_GIT_REF" --subscription "$AZURE_SUBSCRIPTION_ID"
           gh pr comment "${PR_NUMBER}" --repo "$REPO" --body "PR test environment destroy complete for ${CI_GIT_REF}"
 
   destroy_branch_env:
     needs: [pr_comment]
-    if: ${{ (vars.CI_NAMESPACE == '' || vars.CI_CLEANUP_ENABLED == 'true') && (needs.pr_comment.outputs.command == 'test-destroy-env' && needs.pr_comment.outputs.branchCiGitRef != '') }}
+    if: ${{ (needs.pr_comment.outputs.command == 'test-destroy-env' && needs.pr_comment.outputs.branchCiGitRef != '') }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -136,6 +147,13 @@ jobs:
       group: deploy-${{ needs.pr_comment.outputs.branchCiGitRef }}
       cancel-in-progress: false
       queue: max
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+      CI_DEPLOYMENTS_ENABLED: ${{ secrets.CI_DEPLOYMENTS_ENABLED }}
+      CI_CLEANUP_ENABLED: ${{ secrets.CI_CLEANUP_ENABLED }}
+      CI_MAIN_ENABLED: ${{ secrets.CI_MAIN_ENABLED }}
     steps:
       # Ensure we have the script files
       - name: Checkout
@@ -143,16 +161,22 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Read CI activation settings
+        id: scope
+        run: python3 devops/scripts/ci_repository_scope.py prepare --purpose cleanup
+
       # Perform az login for destroy env script to be able to run
       - name: Azure Login
+        if: steps.scope.outputs.cleanup == 'allowed'
         uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          environment: ${{ (vars.AZURE_ENVIRONMENT != '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+          environment: ${{ env.CI_AZURE_ENVIRONMENT }}
 
       - name: Run deployment cleanup
+        if: steps.scope.outputs.cleanup == 'allowed'
         env:
           PR_NUMBER: ${{ github.event.issue.number }}
           REPO: ${{ github.event.repository.full_name }}
@@ -163,6 +187,7 @@ jobs:
           SHOW_KEYVAULT_DEBUG_ON_DESTROY: ${{ secrets.SHOW_KEYVAULT_DEBUG_ON_DESTROY }}
         run: |
           set -e
+          python3 devops/scripts/ci_repository_scope.py mask-inventory
           gh pr comment "${PR_NUMBER}" --repo "$REPO" --body "Destroying branch test environments for ${CI_GIT_REF}... (run: https://github.com/${REPO}/actions/runs/${RUN_ID})"
           python3 devops/scripts/destroy_ci_ref_env.py --ref "$CI_GIT_REF" --subscription "$AZURE_SUBSCRIPTION_ID"
           gh pr comment "${PR_NUMBER}" --repo "$REPO" --body "Branch test environment destroy complete for ${CI_GIT_REF}"
@@ -170,34 +195,35 @@ jobs:
   prepare_pr_env:
     name: Prepare PR environment
     needs: [pr_comment]
-    if: ${{ (vars.CI_NAMESPACE == '' || vars.CI_DEPLOYMENTS_ENABLED == 'true') && (startsWith(needs.pr_comment.outputs.command, 'run-tests')) }}
+    if: ${{ (startsWith(needs.pr_comment.outputs.command, 'run-tests')) }}
     runs-on: ubuntu-latest
     environment: CICD
     outputs:
+      deployment: ${{ steps.environment-id.outputs.deployment }}
       refid: ${{ steps.environment-id.outputs.refid }}
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+      CI_DEPLOYMENTS_ENABLED: ${{ secrets.CI_DEPLOYMENTS_ENABLED }}
+      CI_CLEANUP_ENABLED: ${{ secrets.CI_CLEANUP_ENABLED }}
+      CI_MAIN_ENABLED: ${{ secrets.CI_MAIN_ENABLED }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-      - name: Derive CI environment ID
+      - name: Read CI activation settings
         id: environment-id
         env:
           CI_GIT_REF: ${{ needs.pr_comment.outputs.ciGitRef }}
-          CI_LOCATION: ${{ vars.LOCATION }}
-          CI_AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT || 'AzureCloud' }}
-        run: |
-          set -euo pipefail
-          refid=$(python3 devops/scripts/ci_environment_id.py \
-            --ref "$CI_GIT_REF" --location "$CI_LOCATION" --cloud "$CI_AZURE_ENVIRONMENT")
-          echo "CI environment ${CI_NAMESPACE:-tre}${refid} in ${CI_LOCATION} (${CI_AZURE_ENVIRONMENT})"
-          echo "refid=$refid" >> "$GITHUB_OUTPUT"
+        run: python3 devops/scripts/ci_repository_scope.py prepare --purpose deployment
 
   run_test:
     # Run the tests with the re-usable workflow
     needs: [pr_comment, prepare_pr_env]
     if: >-
-      ${{ (vars.CI_NAMESPACE == '' || vars.CI_DEPLOYMENTS_ENABLED == 'true') &&
+      ${{ needs.prepare_pr_env.outputs.deployment == 'allowed' &&
       (needs.pr_comment.outputs.command == 'run-tests' ||
       needs.pr_comment.outputs.command == 'run-tests-extended' ||
       needs.pr_comment.outputs.command == 'run-tests-extended-aad' ||
@@ -230,6 +256,12 @@ jobs:
       # github-script outputs strings; compare explicitly before passing to the typed workflow input.
       skipDeployment: ${{ needs.pr_comment.outputs.skipDeployment == 'true' }}
     secrets:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_DEPLOYMENTS_ENABLED: ${{ secrets.CI_DEPLOYMENTS_ENABLED }}
+      CI_CLEANUP_ENABLED: ${{ secrets.CI_CLEANUP_ENABLED }}
+      CI_MAIN_ENABLED: ${{ secrets.CI_MAIN_ENABLED }}
+      LOCATION: ${{ secrets.LOCATION }}
+      AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}

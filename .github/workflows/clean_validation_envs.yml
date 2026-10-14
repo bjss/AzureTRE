@@ -23,14 +23,12 @@ on: # yamllint disable-line rule:truthy
 permissions:
   contents: read
 
-env:
-  CI_NAMESPACE: ${{ vars.CI_NAMESPACE }}
-
 jobs:
   plan:
-    if: (vars.CI_NAMESPACE == '' || vars.CI_CLEANUP_ENABLED == 'true') && (github.event_name == 'schedule' || inputs.mode == 'cleanup')
+    if: (github.event_name == 'schedule' || inputs.mode == 'cleanup')
     name: Plan cleanup
     outputs:
+      cleanup: ${{ steps.scope.outputs.cleanup }}
       refs: ${{ steps.plan.outputs.refs }}
     runs-on: ubuntu-latest
     environment: CICD
@@ -38,29 +36,44 @@ jobs:
     permissions:
       id-token: write
       contents: read
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+      CI_DEPLOYMENTS_ENABLED: ${{ secrets.CI_DEPLOYMENTS_ENABLED }}
+      CI_CLEANUP_ENABLED: ${{ secrets.CI_CLEANUP_ENABLED }}
+      CI_MAIN_ENABLED: ${{ secrets.CI_MAIN_ENABLED }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
+      - name: Read CI activation settings
+        id: scope
+        run: python3 devops/scripts/ci_repository_scope.py prepare --purpose cleanup
+
       - name: Azure Login
+        if: steps.scope.outputs.cleanup == 'allowed'
         uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          environment: ${{ vars.AZURE_ENVIRONMENT || secrets.AZURE_ENVIRONMENT || 'AzureCloud' }}
+          environment: ${{ env.CI_AZURE_ENVIRONMENT }}
 
       - name: Plan references from Azure ownership tags
+        if: steps.scope.outputs.cleanup == 'allowed'
         id: plan
         env:
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
+          python3 devops/scripts/ci_repository_scope.py mask-inventory
           refs=$(python3 devops/scripts/ci_cleanup_scope.py plan)
           echo "refs=$refs" >> "$GITHUB_OUTPUT"
 
   clean:
     needs: plan
+    if: needs.plan.outputs.cleanup == 'allowed'
     strategy:
       fail-fast: false
       matrix:
@@ -80,6 +93,13 @@ jobs:
       contents: read
       pull-requests: read # For checking PRs
       actions: read # For checking workflow runs
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+      CI_DEPLOYMENTS_ENABLED: ${{ secrets.CI_DEPLOYMENTS_ENABLED }}
+      CI_CLEANUP_ENABLED: ${{ secrets.CI_CLEANUP_ENABLED }}
+      CI_MAIN_ENABLED: ${{ secrets.CI_MAIN_ENABLED }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -87,15 +107,21 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Read CI activation settings
+        id: scope
+        run: python3 devops/scripts/ci_repository_scope.py prepare --purpose cleanup
+
       - name: Azure Login
+        if: steps.scope.outputs.cleanup == 'allowed'
         uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          environment: ${{ vars.AZURE_ENVIRONMENT || secrets.AZURE_ENVIRONMENT || 'AzureCloud' }}
+          environment: ${{ env.CI_AZURE_ENVIRONMENT }}
 
       - name: Run clean
+        if: steps.scope.outputs.cleanup == 'allowed'
         env:
           CI_CLEANUP_REF: ${{ matrix.ref }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
@@ -104,7 +130,9 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository}}
           BRANCH_LAST_ACTIVITY_IN_HOURS_FOR_STOP: 4
           BRANCH_LAST_ACTIVITY_IN_HOURS_FOR_DESTROY: 48
-        run: devops/scripts/clean_ci_validation_envs.sh
+        run: |
+          python3 devops/scripts/ci_repository_scope.py mask-inventory
+          devops/scripts/clean_ci_validation_envs.sh
 
   validate:
     name: Validate cleanup with disposable groups
@@ -112,7 +140,7 @@ jobs:
       group: deploy-refs/heads/ci-cleanup-validation/${{ github.run_id }}-${{ github.run_attempt }}
       cancel-in-progress: false
       queue: max
-    if: vars.CI_NAMESPACE == '' && github.event_name == 'workflow_dispatch' && inputs.mode == 'validate'
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'validate'
     runs-on: ubuntu-latest
     environment: CICD
     timeout-minutes: 25
@@ -122,6 +150,12 @@ jobs:
       pull-requests: read
       actions: read
     env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+      CI_DEPLOYMENTS_ENABLED: ${{ secrets.CI_DEPLOYMENTS_ENABLED }}
+      CI_CLEANUP_ENABLED: ${{ secrets.CI_CLEANUP_ENABLED }}
+      CI_MAIN_ENABLED: ${{ secrets.CI_MAIN_ENABLED }}
       CI_CLEANUP_JOB_NAME: Validate cleanup with disposable groups
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -131,18 +165,25 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Read CI activation settings
+        id: scope
+        run: python3 devops/scripts/ci_repository_scope.py prepare --purpose validation
+
       - name: Test cleanup and validation guards
+        if: steps.scope.outputs.validation == 'allowed'
         run: python3 -m unittest discover -s devops/tests -p 'test_*.py' -v
 
       - name: Azure Login
+        if: steps.scope.outputs.validation == 'allowed'
         uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          environment: ${{ vars.AZURE_ENVIRONMENT || secrets.AZURE_ENVIRONMENT || 'AzureCloud' }}
+          environment: ${{ env.CI_AZURE_ENVIRONMENT }}
 
       - name: Validate bootstrap and cleanup
+        if: steps.scope.outputs.validation == 'allowed'
         timeout-minutes: 15
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -152,15 +193,15 @@ jobs:
           --state-dir "$RUNNER_TEMP/ci-cleanup-validation" --location "$VALIDATION_LOCATION"
 
       - name: Remove disposable groups
-        if: always()
+        if: (always()) && steps.scope.outputs.validation == 'allowed'
         run: python3 devops/scripts/validate_ci_cleanup.py cleanup --state-dir "$RUNNER_TEMP/ci-cleanup-validation"
 
       - name: Write validation summary
-        if: always()
+        if: (always()) && steps.scope.outputs.validation == 'allowed'
         run: python3 devops/scripts/validate_ci_cleanup.py summary --state-dir "$RUNNER_TEMP/ci-cleanup-validation"
 
       - name: Upload sanitised validation evidence
-        if: always()
+        if: (always()) && steps.scope.outputs.validation == 'allowed'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: ci-cleanup-validation-${{ github.run_id }}-${{ github.run_attempt }}

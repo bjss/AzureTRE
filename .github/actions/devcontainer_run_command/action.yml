@@ -238,9 +238,8 @@ runs:
       shell: bash
       env:
         TF_VAR_ci_git_ref: ${{ inputs.CI_GIT_REF }}
-        TF_VAR_ci_namespace: ${{ vars.CI_NAMESPACE }}
-        TF_VAR_ci_repository_id: ${{ vars.CI_NAMESPACE != '' && github.repository_id || '' }}
-        CI_NAMESPACE: ${{ vars.CI_NAMESPACE }}
+        TF_VAR_ci_namespace: ${{ env.CI_NAMESPACE }}
+        TF_VAR_ci_repository_id: ${{ env.CI_NAMESPACE != '' && github.repository_id || '' }}
         CI_BOOTSTRAP_LEASE_RECOVERY: >-
           ${{ github.event_name == 'issue_comment' && startsWith(inputs.CI_GIT_REF, 'refs/pull/') }}
         CI_RECOVERY_PR_NUMBER: ${{ github.event.issue.number }}

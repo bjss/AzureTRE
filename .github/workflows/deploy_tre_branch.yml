@@ -41,48 +41,39 @@ on: # yamllint disable-line rule:truthy
 permissions:
   contents: read
 
-env:
-  CI_NAMESPACE: ${{ vars.CI_NAMESPACE }}
-
 jobs:
   prepare-not-main:
     name: Preparation
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     if: |
-      github.ref != 'refs/heads/main' && (vars.CI_NAMESPACE == '' || vars.CI_DEPLOYMENTS_ENABLED == 'true')
+      github.ref != 'refs/heads/main'
     outputs:
+      deployment: ${{ steps.run-id.outputs.deployment }}
       refid: ${{ steps.run-id.outputs.refid }}
     permissions:
       contents: read
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+      CI_DEPLOYMENTS_ENABLED: ${{ secrets.CI_DEPLOYMENTS_ENABLED }}
+      CI_CLEANUP_ENABLED: ${{ secrets.CI_CLEANUP_ENABLED }}
+      CI_MAIN_ENABLED: ${{ secrets.CI_MAIN_ENABLED }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
-      - id: run-id
-        name: Get run id
+      - name: Read CI activation settings
+        id: run-id
         env:
           CI_GIT_REF: ${{ github.ref }}
-          CI_LOCATION: ${{ vars.LOCATION }}
-          CI_AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT || 'AzureCloud' }}
-        run: |
-          set -o errexit
-          set -o pipefail
-          set -o nounset
-          # Debug output for checking SHA used in checks-action
-          echo "git SHA:    $(git rev-parse --abbrev-ref HEAD)"
-          echo "git ref:    $(git rev-parse HEAD)"
-          echo "github sha: ${GITHUB_SHA}"
-          echo "github ref: ${GITHUB_REF}"
-          REFID=$(python3 devops/scripts/ci_environment_id.py \
-            --ref "$CI_GIT_REF" --location "$CI_LOCATION" --cloud "$CI_AZURE_ENVIRONMENT")
-          echo "using id of: ${REFID} for GitHub Ref: ${GITHUB_REF}"
-          echo "refid=${REFID}" >> "$GITHUB_OUTPUT"
+        run: python3 devops/scripts/ci_repository_scope.py prepare --purpose deployment
 
   run-deploy-tre-not-main:
     name: "Deploy PR"
-    if: ${{ github.ref != 'refs/heads/main' && (vars.CI_NAMESPACE == '' || vars.CI_DEPLOYMENTS_ENABLED == 'true') }}
+    if: ${{ github.ref != 'refs/heads/main' && needs.prepare-not-main.outputs.deployment == 'allowed' }}
     needs: [prepare-not-main]
     uses: ./.github/workflows/deploy_tre_reusable.yml
     permissions:
@@ -102,6 +93,12 @@ jobs:
       E2E_TESTS_NUMBER_PROCESSES: ${{ fromJSON(github.event.inputs.e2eProcesses) }}
       DEVCONTAINER_TAG: ${{ needs.prepare-not-main.outputs.refid }}
     secrets:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_DEPLOYMENTS_ENABLED: ${{ secrets.CI_DEPLOYMENTS_ENABLED }}
+      CI_CLEANUP_ENABLED: ${{ secrets.CI_CLEANUP_ENABLED }}
+      CI_MAIN_ENABLED: ${{ secrets.CI_MAIN_ENABLED }}
+      LOCATION: ${{ secrets.LOCATION }}
+      AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT }}
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
       AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}

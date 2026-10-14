@@ -88,37 +88,122 @@ def verify_deployment():
     verify_groups(azure("group", "list"), "rg-" + tre_id, ref)
 
 
+def mask(value):
+    """Register masks before exporting or displaying derived configuration."""
+    if value:
+        escaped = value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print("::add-mask::" + escaped, flush=True)
+
+
+def resource_names(ref, location, cloud, namespace, repository_id):
+    from ci_environment_id import environment_id
+
+    suffix = environment_id(ref, location, cloud, namespace, repository_id)
+    tre_id = namespace + suffix
+    return {
+        "CI_ENVIRONMENT_ID": suffix,
+        "CI_TRE_ID": tre_id,
+        "CI_ACR_NAME": tre_id,
+        "CI_MGMT_RESOURCE_GROUP_NAME": f"rg-{tre_id}-mgmt",
+        "CI_MGMT_STORAGE_ACCOUNT_NAME": tre_id + "mgmt",
+        "CI_ENCRYPTION_KV_NAME": tre_id + "mgmt",
+        "CI_DEVCONTAINER_TAG": tre_id,
+    }
+
+
+def export_names():
+    namespace, repository_id = settings()
+    if not namespace:
+        return
+    values = resource_names(
+        os.environ["CI_GIT_REF"],
+        os.environ.get("CI_LOCATION", ""),
+        os.environ.get("CI_AZURE_ENVIRONMENT", ""),
+        namespace,
+        repository_id,
+    )
+    # A mask for the suffix also covers resource names derived by templates.
+    for value in sorted(set(values.values()), key=len, reverse=True):
+        mask(value)
+        mask(value.upper())
+    with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+        for key, value in values.items():
+            output.write(f"{key}={value}\n")
+
+
+def activation(purpose):
+    namespace, _ = settings()
+    if not namespace:
+        return True
+    if purpose == "validation":
+        return False
+    flag = "CI_DEPLOYMENTS_ENABLED" if purpose == "deployment" else "CI_CLEANUP_ENABLED"
+    enabled = os.environ.get(flag, "") == "true"
+    if purpose == "deployment" and os.environ.get("CI_GIT_REF") == "refs/heads/main":
+        enabled = enabled and os.environ.get("CI_MAIN_ENABLED") == "true"
+    return enabled
+
+
+def prepare(purpose):
+    for key in ("CI_NAMESPACE", "CI_LOCATION", "CI_AZURE_ENVIRONMENT"):
+        mask(os.environ.get(key, ""))
+    allowed = activation(purpose)
+    if allowed and purpose == "deployment":
+        export_names()
+    with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+        output.write(f"{purpose}={'allowed' if allowed else 'blocked'}\n")
+        # Legacy callers still pass the pre-existing public suffix. A namespace
+        # never exports its suffix or names as step/job outputs.
+        ref = os.environ.get("CI_GIT_REF", "")
+        if allowed and purpose == "deployment" and not settings()[0] and ref != "refs/heads/main":
+            from ci_environment_id import environment_id
+
+            suffix = environment_id(ref, os.environ.get("CI_LOCATION", ""), os.environ.get("CI_AZURE_ENVIRONMENT", ""))
+            output.write(f"refid={suffix}\n")
+
+
+def mask_inventory():
+    """Mask owned environment names before cleanup prints its Azure inventory."""
+    namespace, _ = settings()
+    if not namespace:
+        return
+    groups = azure("group", "list")
+    if not isinstance(groups, list):
+        raise ValueError("Invalid resource group inventory.")
+    roots = []
+    for group in groups:
+        if not isinstance(group, dict) or not isinstance(group.get("name"), str):
+            raise ValueError("Invalid resource group identity.")
+        name = group.get("name", "")
+        if re.fullmatch(group_pattern(), name) and owns(group.get("tags")):
+            tre_id = name.removeprefix("rg-").removesuffix("-mgmt")
+            roots.append("rg-" + tre_id)
+            for value in (name, tre_id, tre_id[len(namespace) :]):
+                mask(value)
+                mask(value.upper())
+    for group in groups:
+        name = group.get("name", "")
+        if any(name.startswith((root + "-ws-", root + "-svc-")) for root in roots):
+            mask(name)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("resolve", "verify-deployment", "verify-destroy", "verify-legacy-main"))
+    parser.add_argument(
+        "operation",
+        choices=("prepare", "resolve", "mask-inventory", "verify-deployment", "verify-destroy", "verify-legacy-main"),
+    )
     parser.add_argument("--group")
+    parser.add_argument("--purpose", choices=("deployment", "cleanup", "validation"), default="deployment")
     args = parser.parse_args()
     try:
         namespace, repository_id = settings()
-        if args.operation == "resolve":
-            if not namespace:
-                return 0
-            from ci_environment_id import environment_id
-
-            suffix = environment_id(
-                os.environ["CI_GIT_REF"],
-                os.environ.get("CI_LOCATION", ""),
-                os.environ.get("CI_AZURE_ENVIRONMENT", ""),
-                namespace,
-                repository_id,
-            )
-            tre_id = namespace + suffix
-            values = {
-                "tre_id": tre_id,
-                "acr_name": tre_id,
-                "mgmt_resource_group_name": f"rg-{tre_id}-mgmt",
-                "mgmt_storage_account_name": tre_id + "mgmt",
-                "encryption_kv_name": tre_id + "mgmt",
-                "devcontainer_tag": tre_id,
-            }
-            with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-                for key, value in values.items():
-                    output.write(f"{key}={value}\n")
+        if args.operation == "prepare":
+            prepare(args.purpose)
+        elif args.operation == "resolve":
+            export_names()
+        elif args.operation == "mask-inventory":
+            mask_inventory()
         elif args.operation == "verify-deployment":
             verify_deployment()
         elif args.operation == "verify-legacy-main":

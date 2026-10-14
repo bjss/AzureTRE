@@ -16,7 +16,7 @@ on: # yamllint disable-line rule:truthy
 # This will prevent multiple runs of this entire workflow.
 # We should NOT cancel in progress runs as that can destabilize the environment.
 concurrency:
-  group: ${{ vars.CI_NAMESPACE != '' && 'deploy-refs/heads/main' || 'letsencrypt' }}
+  group: deploy-refs/heads/main
   cancel-in-progress: false
   queue: max
 
@@ -25,32 +25,36 @@ permissions:
   contents: read
 
 env:
-  CI_NAMESPACE: ${{ vars.CI_NAMESPACE }}
   USE_ENV_VARS_NOT_FILES: true
   TF_INPUT: 0 # interactive is off
   TF_IN_AUTOMATION: 1 # Run in headless mode
 
 jobs:
   renew_letsencrypt_certs:
-    if: ${{ vars.CI_NAMESPACE == '' || (vars.CI_DEPLOYMENTS_ENABLED == 'true' && vars.CI_MAIN_ENABLED == 'true') }}
     name: Renew Lets Encrypt Certificates
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.environment || 'CICD' }}
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+      CI_DEPLOYMENTS_ENABLED: ${{ secrets.CI_DEPLOYMENTS_ENABLED }}
+      CI_CLEANUP_ENABLED: ${{ secrets.CI_CLEANUP_ENABLED }}
+      CI_MAIN_ENABLED: ${{ secrets.CI_MAIN_ENABLED }}
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
 
-      - name: Resolve main CI names
-        id: names
+      - name: Read CI activation settings
+        id: scope
         env:
           CI_GIT_REF: refs/heads/main
-          CI_LOCATION: ${{ vars.LOCATION }}
-          CI_AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT || 'AzureCloud' }}
-        run: python3 devops/scripts/ci_repository_scope.py resolve
+        run: python3 devops/scripts/ci_repository_scope.py prepare --purpose deployment
 
       - name: Install specific Azure CLI version
+        if: steps.scope.outputs.deployment == 'allowed'
         run: |
           AZ_DIST=$(lsb_release -cs)
           AZ_VER=2.81.0
@@ -60,33 +64,36 @@ jobs:
           az version
 
       - name: Install Terraform
+        if: steps.scope.outputs.deployment == 'allowed'
         uses: hashicorp/setup-terraform@5e8dbf3c6d9deaf4193ca7a8fb23f2ac83bb6c85 # v4.0.0
         with:
           terraform_version: 1.14.3
           terraform_wrapper: false
 
       - name: Azure Login
+        if: steps.scope.outputs.deployment == 'allowed'
         uses: azure/login@532459ea530d8321f2fb9bb10d1e0bcf23869a43 # v3.0.0
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          environment: ${{ (vars.AZURE_ENVIRONMENT != '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+          environment: ${{ env.CI_AZURE_ENVIRONMENT }}
 
       - name: Renew Certificates
+        if: steps.scope.outputs.deployment == 'allowed'
         shell: bash
         env:
           ARM_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ (vars.AZURE_ENVIRONMENT != '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
-          LOCATION: ${{ vars.LOCATION }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
+          LOCATION: ${{ env.CI_LOCATION }}
           TF_VAR_ci_git_ref: refs/heads/main
-          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || steps.names.outputs.acr_name }}
-          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || steps.names.outputs.tre_id }}
+          ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
+          TRE_ID: ${{ env.CI_NAMESPACE == '' && secrets.TRE_ID || env.CI_TRE_ID }}
           TF_VAR_terraform_state_container_name: ${{ secrets.TERRAFORM_STATE_CONTAINER_NAME || 'tfstate' }}
-          TF_VAR_mgmt_resource_group_name: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || steps.names.outputs.mgmt_resource_group_name }}
-          TF_VAR_mgmt_storage_account_name: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || steps.names.outputs.mgmt_storage_account_name }}
+          TF_VAR_mgmt_resource_group_name: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || env.CI_MGMT_RESOURCE_GROUP_NAME }}
+          TF_VAR_mgmt_storage_account_name: ${{ env.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || env.CI_MGMT_STORAGE_ACCOUNT_NAME }}
           CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN }}
           PRIVATE_AGENT_SUBNET_ID: ${{ secrets.PRIVATE_AGENT_SUBNET_ID }}
         run: |

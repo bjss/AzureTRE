@@ -1,4 +1,4 @@
-# Opt-in CI repository isolation
+# Opt-in CI repository isolation with secrets
 
 CI can share an Azure subscription across repositories without sharing deployment names or Terraform state.
 This is an operational ownership boundary. It does not restrict what code with subscription-wide credentials can do.
@@ -6,10 +6,11 @@ Use separate application registrations for CI deployments and tests where they h
 
 ## Configuration
 
-Set these **repository Actions variables**, not environment variables. Job conditions run before environment variables become available.
-Do not override these settings in a GitHub environment.
+Set these **Actions secrets** in the selected deployment environment, normally `CICD`.
+Repository secrets are also supported. Environment secrets take precedence.
+A preparation step reads the secrets inside each environment job before allowing Azure access.
 
-| Variable | CGI value | Behaviour when the namespace is set |
+| Secret | CGI value | Behaviour when the namespace is set |
 | --- | --- | --- |
 | `CI_NAMESPACE` | `cgi` | Enables namespaced names and repository ownership checks. |
 | `CI_DEPLOYMENTS_ENABLED` | `false` initially | Set to `true` to enable deployment and E2E jobs. |
@@ -25,7 +26,11 @@ Keep the namespace fixed after creating resources. Changing namespace, repositor
 
 Credentials remain GitHub secrets. Existing environment credentials can remain in `CICD`.
 In namespaced mode, generated resource configuration takes precedence over the legacy resource-name secrets.
-The workflow resolves names without credentials and distributes them as job outputs.
+Each job derives its resource names locally and registers log masks before exporting them through `GITHUB_ENV`.
+Only non-sensitive activation decisions pass between jobs. Namespaced resource names never pass through job outputs.
+GitHub can suppress job outputs containing secrets, so changing `vars` to `secrets` alone would not work.
+Legacy mode still accepts the existing `LOCATION` and `AZURE_ENVIRONMENT` variables when corresponding secrets are absent.
+Namespaced mode requires the `LOCATION` secret. Other existing tuning variables retain their existing behaviour.
 
 ## Names and ownership
 
@@ -55,17 +60,34 @@ Namespaced main environments are persistent: hourly cleanup does not delete thei
 The legacy disposable-group validation workflow remains available only in legacy mode.
 Validate namespaced cleanup using a disposable branch deployment and its explicit cleanup command.
 
+## Log masking
+
+GitHub masks configured secret values. The resolver also registers masks for generated TRE IDs, suffixes,
+resource groups, registry names, storage names and image tags before later steps use them.
+Cleanup registers masks for owned environments before printing its inventory or targets.
+
+For the synthetic suffix above, a log line such as `TRE_ID=cgi12345678` becomes `TRE_ID=***`.
+Names containing a masked suffix are also redacted, although fixed prefixes and resource types can remain visible.
+The workflow uses `allowed` and `blocked` as activation outputs so the secret flag value `true` is never an output.
+
+Masking applies to Actions logs. It does not sanitise uploaded files, test reports, artifacts or PR comments.
+Review those outputs separately before activating public deployment runs.
+Encoded or otherwise transformed values need their own masks. This prototype does not prove that every tool output is covered.
+
+See GitHub's [secret guidance](https://docs.github.com/en/actions/how-tos/write-workflows/choose-what-workflows-do/use-secrets)
+and [job output behaviour](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idoutputs).
+
 ## Activation procedure
 
 Before activation, review every cleanup implementation sharing the subscription.
 Install the ownership exclusion safeguard in those repositories, or keep their cleanup disabled during validation.
 Do not publish or trigger an upstream change as part of configuring this fork.
 
-1. Merge the implementation while inherited Actions remain disabled.
-2. Configure `CI_NAMESPACE=cgi` and set all three switches to `false`.
-3. Configure `LOCATION`, credentials and the matching `CICD` OIDC federation subject.
-4. Check that application registrations and custom domains will not overwrite another deployment's configuration.
-5. Enable GitHub Actions and validate ordinary PR checks.
+1. Keep deployment and cleanup workflows disabled while preparing the fork configuration.
+2. Configure the `CI_NAMESPACE` secret as `cgi` and all three switch secrets as `false`.
+3. Configure the `LOCATION` secret, credentials and the matching `CICD` OIDC federation subject.
+4. Merge the chosen implementation into the fork's `main` branch before enabling deployment workflows.
+5. Check application registrations and custom domains, then enable Actions and validate ordinary PR checks.
 6. Set `CI_DEPLOYMENTS_ENABLED=true` after reviewing the exact deployment commit.
 7. Dispatch a trusted disposable branch deployment.
 8. Confirm generated names, state storage, cache location and root ownership tags.
@@ -73,7 +95,8 @@ Do not publish or trigger an upstream change as part of configuring this fork.
 10. Validate explicit cleanup of the disposable branch while confirming other repositories' groups remain untouched.
 11. Enable main deployments separately if required.
 
-Disabling a switch prevents new jobs. It does not cancel a job already running.
+Disabling a switch blocks new Azure work when preparation reads it. It does not cancel work already authorised by a running job.
+Configuration jobs still run to read environment secrets. Certificate renewal shares the main deployment concurrency queue.
 GitHub concurrency queues are repository-local. They do not coordinate separate repositories, so ownership checks are required in both.
 Shared Entra permissions, network limits and subscription quotas remain shared constraints.
 No network access or Azure roles are expanded by this code change.
@@ -88,4 +111,6 @@ npm --prefix .github/scripts ci
 npm --prefix .github/scripts test -- --runInBand
 ```
 
-These tests use synthetic identities and mocked Azure calls. They do not establish live Azure isolation or successful deployment.
+These tests use synthetic identities, mocked Azure calls and workflow contracts.
+They check mask registration and output routing, but do not exercise the GitHub runner masking engine.
+Live Actions masking, Azure isolation and successful deployment remain separate validation steps.

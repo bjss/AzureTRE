@@ -15,12 +15,8 @@ on:
 permissions:
   contents: read
 
-env:
-  CI_NAMESPACE: ${{ vars.CI_NAMESPACE }}
-
 jobs:
   build:
-    if: ${{ vars.CI_NAMESPACE == '' || (vars.CI_DEPLOYMENTS_ENABLED == 'true' && vars.CI_MAIN_ENABLED == 'true') }}
     runs-on: ubuntu-latest
     # environment is used to access the secrets for Azure credentials
     # to sign in to a container registry to re-use a dev container image as a build cache
@@ -30,19 +26,25 @@ jobs:
       contents: read
       actions: write # For uploading wheel artifact
 
+    env:
+      CI_NAMESPACE: ${{ secrets.CI_NAMESPACE }}
+      CI_LOCATION: ${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}
+      CI_AZURE_ENVIRONMENT: ${{ secrets.AZURE_ENVIRONMENT || (secrets.CI_NAMESPACE == '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+      CI_DEPLOYMENTS_ENABLED: ${{ secrets.CI_DEPLOYMENTS_ENABLED }}
+      CI_CLEANUP_ENABLED: ${{ secrets.CI_CLEANUP_ENABLED }}
+      CI_MAIN_ENABLED: ${{ secrets.CI_MAIN_ENABLED }}
     steps:
       - name: Checkout (GitHub)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
-      - name: Resolve main CI names
-        id: names
+      - name: Read CI activation settings
+        id: scope
         env:
           CI_GIT_REF: refs/heads/main
-          CI_LOCATION: ${{ vars.LOCATION }}
-          CI_AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT || 'AzureCloud' }}
-        run: python3 devops/scripts/ci_repository_scope.py resolve
+        run: python3 devops/scripts/ci_repository_scope.py prepare --purpose deployment
 
       - name: Build and run dev container task
+        if: steps.scope.outputs.deployment == 'allowed'
         uses: ./.github/actions/devcontainer_run_command
         with:
           COMMAND: |
@@ -51,28 +53,30 @@ jobs:
             make pip-install install-cli
             source <(_TRE_COMPLETE=bash_source tre)
             tre --help
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && 'latest' || steps.names.outputs.devcontainer_tag }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || steps.names.outputs.acr_name }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && 'latest' || env.CI_DEVCONTAINER_TAG }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT || secrets.AZURE_ENVIRONMENT || 'AzureCloud' }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
 
       - name: Create the CLI package
+        if: steps.scope.outputs.deployment == 'allowed'
         uses: ./.github/actions/devcontainer_run_command
         with:
           COMMAND: |
             # Create the python wheel
             cd cli
             sudo make build-package
-          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && 'latest' || steps.names.outputs.devcontainer_tag }}
-          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || steps.names.outputs.acr_name }}
+          DEVCONTAINER_TAG: ${{ env.CI_NAMESPACE == '' && 'latest' || env.CI_DEVCONTAINER_TAG }}
+          CI_CACHE_ACR_NAME: ${{ env.CI_NAMESPACE == '' && secrets.ACR_NAME || env.CI_ACR_NAME }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT || secrets.AZURE_ENVIRONMENT || 'AzureCloud' }}
+          AZURE_ENVIRONMENT: ${{ env.CI_AZURE_ENVIRONMENT }}
 
       - name: Upload Wheel as artifact
+        if: steps.scope.outputs.deployment == 'allowed'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: tre-cli

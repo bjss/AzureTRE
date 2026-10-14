@@ -1,9 +1,12 @@
 """Exercise repository boundaries without Azure access."""
 
 from copy import deepcopy
+from contextlib import redirect_stdout
+from io import StringIO
 import os
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
@@ -142,6 +145,81 @@ class RepositoryScopeTests(unittest.TestCase):
             self.assertRaises(ValueError),
         ):
             scope.verify_deployment()
+        azure.assert_not_called()
+
+    def test_mask_escapes_workflow_commands(self):
+        log = StringIO()
+        with redirect_stdout(log):
+            scope.mask("synthetic%\r\n::warning::value")
+        self.assertEqual(log.getvalue(), "::add-mask::synthetic%25%0D%0A::warning::value\n")
+
+    def test_masks_are_registered_before_names_are_exported(self):
+        with TemporaryDirectory() as directory:
+            env_file = Path(directory) / "environment"
+            output_file = Path(directory) / "output"
+            observed = []
+
+            def record(value):
+                self.assertFalse(env_file.exists())
+                observed.append(value)
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CI_GIT_REF": REF,
+                        "CI_LOCATION": "switzerlandnorth",
+                        "GITHUB_ENV": str(env_file),
+                        "GITHUB_OUTPUT": str(output_file),
+                    },
+                ),
+                patch.object(scope, "mask", side_effect=record),
+            ):
+                scope.export_names()
+            for line in env_file.read_text().splitlines():
+                self.assertIn(line.split("=", 1)[1], observed)
+            self.assertFalse(output_file.exists())
+
+    def test_missing_region_fails_without_names_or_decision_outputs(self):
+        with TemporaryDirectory() as directory:
+            env_file = Path(directory) / "environment"
+            output_file = Path(directory) / "output"
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CI_GIT_REF": REF,
+                        "CI_DEPLOYMENTS_ENABLED": "true",
+                        "GITHUB_ENV": str(env_file),
+                        "GITHUB_OUTPUT": str(output_file),
+                    },
+                ),
+                patch.object(scope, "mask"),
+                self.assertRaises(ValueError),
+            ):
+                scope.prepare("deployment")
+            self.assertFalse(env_file.exists())
+            self.assertFalse(output_file.exists())
+
+    def test_inventory_masks_owned_names_and_descendants(self):
+        descendant = {"name": "rg-cgi12345678-ws-synthetic", "tags": {}}
+        foreign = {"name": "rg-cgi87654321", "tags": {**self.tags, "ci_repository_id": "2"}}
+        log = StringIO()
+        with patch.object(scope, "azure", return_value=[*self.groups, descendant, foreign]), redirect_stdout(log):
+            scope.mask_inventory()
+        for value in ("cgi12345678", "12345678", descendant["name"]):
+            self.assertIn("::add-mask::" + value + "\n", log.getvalue())
+        self.assertNotIn("87654321", log.getvalue())
+
+    def test_inventory_rejects_invalid_shapes(self):
+        for groups in ({}, [None], [{"name": 1}]):
+            with patch.object(scope, "azure", return_value=groups), self.assertRaises(ValueError):
+                scope.mask_inventory()
+
+    def test_legacy_resolver_and_mask_inventory_do_nothing(self):
+        with patch.dict(os.environ, {"CI_NAMESPACE": ""}), patch.object(scope, "azure") as azure:
+            scope.export_names()
+            scope.mask_inventory()
         azure.assert_not_called()
 
 

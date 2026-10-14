@@ -98,7 +98,7 @@ describe('regional CI workflow routing', () => {
     const jobs = workflow('pr_comment_bot.yml').jobs;
     expect(jobs.prepare_pr_env.environment).toBe(jobs.run_test.with.environmentName);
     expect(jobs.run_test.needs).toContain('prepare_pr_env');
-    expect(jobs.prepare_pr_env.steps.find(step => step.id === 'environment-id').env.CI_LOCATION).toBe('${{ vars.LOCATION }}');
+    expect(jobs.prepare_pr_env.env.CI_LOCATION).toBe("${{ secrets.LOCATION || (secrets.CI_NAMESPACE == '' && vars.LOCATION) || '' }}");
   });
 
   test('branch preparation uses the selected deployment environment', () => {
