@@ -12,6 +12,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import quote
 
+from ci_repository_scope import owns, settings
 from ci_environment_id import environment_id
 
 
@@ -50,14 +51,16 @@ def context():
     )
     ref_id = hashlib.sha512((ref + "\n").encode()).hexdigest()[:8]
     regional_id = env.get("CI_ENVIRONMENT_ID", "")
+    require(not settings()[0] or regional_id, "Namespaced recovery requires the regional CI environment identity.")
     if regional_id:
         try:
-            ref_id = environment_id(ref, env.get("TF_VAR_location", ""), env.get("AZURE_ENVIRONMENT", ""))
+            ref_id = environment_id(ref, env.get("TF_VAR_location", ""), env.get("AZURE_ENVIRONMENT", ""), *settings())
         except ValueError as error:
             raise RecoveryError(str(error)) from error
         require(regional_id == ref_id, "The regional CI environment identity does not match.")
-    group = "rg-tre" + ref_id + "-mgmt"
-    account = "tre" + ref_id + "mgmt"
+    prefix = settings()[0] or "tre"
+    group = "rg-" + prefix + ref_id + "-mgmt"
+    account = prefix + ref_id + "mgmt"
     require(
         env.get("TF_VAR_mgmt_resource_group_name") == group and env.get("TF_VAR_mgmt_storage_account_name") == account,
         "The management account is not the expected isolated PR backend.",
@@ -100,7 +103,7 @@ def verify_owner(ctx):
         "The management resource group identity does not match.",
     )
     require(
-        isinstance(group.get("tags"), dict) and group["tags"].get("ci_git_ref") == ctx["ref"],
+        isinstance(group.get("tags"), dict) and owns(group["tags"]) and group["tags"].get("ci_git_ref") == ctx["ref"],
         "The management resource group is not tagged for this PR.",
     )
 

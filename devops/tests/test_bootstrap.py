@@ -261,7 +261,7 @@ class TerraformScriptTests(unittest.TestCase):
         workflows.mkdir(parents=True)
         for name in ("pr_comment_bot.yml", "deploy_tre_reusable.yml", "clean_validation_envs.yml"):
             shutil.copy2(DEVOPS.parent / ".github/workflows" / name, workflows / name)
-        for script in ("recover_bootstrap_lease.py", "ci_environment_id.py"):
+        for script in ("recover_bootstrap_lease.py", "ci_environment_id.py", "ci_repository_scope.py"):
             shutil.copy2(DEVOPS / "scripts" / script, scripts / script)
 
     def run_script(self, script, **config):

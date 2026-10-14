@@ -61,3 +61,15 @@ variable "disable_acr_public_access" {
   description = "A boolean indicating if ACR public access should be disabled"
   default     = false
 }
+
+variable "ci_namespace" {
+  type        = string
+  description = "Optional CI resource namespace. Empty retains legacy behaviour."
+  default     = ""
+}
+
+variable "ci_repository_id" {
+  type        = string
+  description = "Immutable GitHub repository ID for namespaced CI ownership."
+  default     = ""
+}

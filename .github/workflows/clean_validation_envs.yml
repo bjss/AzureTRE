@@ -23,9 +23,12 @@ on: # yamllint disable-line rule:truthy
 permissions:
   contents: read
 
+env:
+  CI_NAMESPACE: ${{ vars.CI_NAMESPACE }}
+
 jobs:
   plan:
-    if: github.event_name == 'schedule' || inputs.mode == 'cleanup'
+    if: (vars.CI_NAMESPACE == '' || vars.CI_CLEANUP_ENABLED == 'true') && (github.event_name == 'schedule' || inputs.mode == 'cleanup')
     name: Plan cleanup
     outputs:
       refs: ${{ steps.plan.outputs.refs }}
@@ -46,7 +49,7 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          environment: ${{ (secrets.AZURE_ENVIRONMENT != '' && secrets.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+          environment: ${{ vars.AZURE_ENVIRONMENT || secrets.AZURE_ENVIRONMENT || 'AzureCloud' }}
 
       - name: Plan references from Azure ownership tags
         id: plan
@@ -90,7 +93,7 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          environment: ${{ (secrets.AZURE_ENVIRONMENT != '' && secrets.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+          environment: ${{ vars.AZURE_ENVIRONMENT || secrets.AZURE_ENVIRONMENT || 'AzureCloud' }}
 
       - name: Run clean
         env:
@@ -109,7 +112,7 @@ jobs:
       group: deploy-refs/heads/ci-cleanup-validation/${{ github.run_id }}-${{ github.run_attempt }}
       cancel-in-progress: false
       queue: max
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'validate'
+    if: vars.CI_NAMESPACE == '' && github.event_name == 'workflow_dispatch' && inputs.mode == 'validate'
     runs-on: ubuntu-latest
     environment: CICD
     timeout-minutes: 25
@@ -137,7 +140,7 @@ jobs:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          environment: ${{ (secrets.AZURE_ENVIRONMENT != '' && secrets.AZURE_ENVIRONMENT) || 'AzureCloud' }}
+          environment: ${{ vars.AZURE_ENVIRONMENT || secrets.AZURE_ENVIRONMENT || 'AzureCloud' }}
 
       - name: Validate bootstrap and cleanup
         timeout-minutes: 15

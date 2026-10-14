@@ -137,9 +137,38 @@ concurrency:
 
 env:
   CI_ENVIRONMENT_ID: ${{ inputs.ciEnvironmentId }}
+  CI_NAMESPACE: ${{ vars.CI_NAMESPACE }}
 
 jobs:
+  ci_config:
+    name: Resolve CI configuration
+    if: ${{ (vars.CI_NAMESPACE == '' || vars.CI_DEPLOYMENTS_ENABLED == 'true') && (inputs.ciGitRef != 'refs/heads/main' || vars.CI_NAMESPACE == '' || vars.CI_MAIN_ENABLED == 'true') }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environmentName }}
+    permissions:
+      contents: read
+    outputs:
+      tre_id: ${{ steps.names.outputs.tre_id }}
+      acr_name: ${{ steps.names.outputs.acr_name }}
+      mgmt_resource_group_name: ${{ steps.names.outputs.mgmt_resource_group_name }}
+      mgmt_storage_account_name: ${{ steps.names.outputs.mgmt_storage_account_name }}
+      encryption_kv_name: ${{ steps.names.outputs.encryption_kv_name }}
+      devcontainer_tag: ${{ steps.names.outputs.devcontainer_tag }}
+    steps:
+      - name: Checkout configuration code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          persist-credentials: false
+      - name: Resolve names
+        id: names
+        env:
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
+          CI_LOCATION: ${{ vars.LOCATION }}
+          CI_AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT || 'AzureCloud' }}
+        run: python3 devops/scripts/ci_repository_scope.py resolve
+
   deploy_management:
+    needs: [ci_config]
     name: Deploy Management
     if: ${{ !inputs.skipDeployment }}
     runs-on: ubuntu-latest
@@ -166,7 +195,7 @@ jobs:
           if [ "${{ secrets.AAD_TENANT_ID }}" == '' ]; then
             echo "Missing secret: AAD_TENANT_ID" && exit 1
           fi
-          if [ "${{ secrets.ACR_NAME }}" == '' ]; then
+          if [ "${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}" == '' ]; then
             echo "Missing secret: ACR_NAME" && exit 1
           fi
           if [ "${{ secrets.API_CLIENT_ID }}" == '' ]; then
@@ -181,10 +210,10 @@ jobs:
           if [ "${{ secrets.APPLICATION_ADMIN_CLIENT_SECRET }}" == '' ]; then
             echo "Missing secret: APPLICATION_ADMIN_CLIENT_SECRET" && exit 1
           fi
-          if [ "${{ secrets.MGMT_RESOURCE_GROUP_NAME }}" == '' ]; then
+          if [ "${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}" == '' ]; then
             echo "Missing secret: MGMT_RESOURCE_GROUP_NAME" && exit 1
           fi
-          if [ "${{ secrets.MGMT_STORAGE_ACCOUNT_NAME }}" == '' ]; then
+          if [ "${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}" == '' ]; then
             echo "Missing secret: MGMT_STORAGE_ACCOUNT_NAME" && exit 1
           fi
           if [ "${{ secrets.SWAGGER_UI_CLIENT_ID }}" == '' ]; then
@@ -205,7 +234,7 @@ jobs:
           if [ "${{ secrets.TEST_ACCOUNT_CLIENT_SECRET }}" == '' ]; then
             echo "Missing secret: TEST_ACCOUNT_CLIENT_SECRET" && exit 1
           fi
-          if [ "${{ secrets.TRE_ID }}" == '' ]; then
+          if [ "${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}" == '' ]; then
             echo "Missing secret: TRE_ID" && exit 1
           fi
           if [ "${{ secrets.AZURE_CLIENT_ID }}" == '' ]; then
@@ -218,7 +247,7 @@ jobs:
             echo "Missing secret: AZURE_SUBSCRIPTION_ID" && exit 1
           fi
 
-          if [ "${{ inputs.DEVCONTAINER_TAG }}" == '' ]; then
+          if [ "${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}" == '' ]; then
             echo "Missing input: DEVCONTAINER_TAG" && exit 1
           fi
 
@@ -226,7 +255,7 @@ jobs:
             echo "Missing variable: LOCATION" && exit 1
           fi
 
-          if [ "${{ secrets.CI_CACHE_ACR_NAME }}" == '' ]; then
+          if [ "${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}" == '' ]; then
             echo "CI_CACHE_ACR_NAME is not set. Please run the workflow on the main branch first." && exit 1
           fi
 
@@ -263,7 +292,7 @@ jobs:
         id: ci_cache_acr_login
         # will fail if this is a new env which is expected
         continue-on-error: true
-        run: az acr login --name "${{ secrets.CI_CACHE_ACR_NAME }}"
+        run: az acr login --name "${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}"
 
       - name: Build new devcontainer
         env:
@@ -274,41 +303,41 @@ jobs:
           USER_UID=$(id -u)
           USER_GID=$(id -g)
           acr_domain_suffix=$(az cloud show --query suffixes.acrLoginServerEndpoint --output tsv)
-          CI_CACHE_ACR_URI=${{ secrets.CI_CACHE_ACR_NAME }}${acr_domain_suffix}
+          CI_CACHE_ACR_URI=${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}${acr_domain_suffix}
           echo "CI_CACHE_ACR_URI=$CI_CACHE_ACR_URI" >> "$GITHUB_ENV"
 
           docker_cache=()
           if [ "${{ steps.ci_cache_acr_login.outcome }}" = "success" ]; then
-            docker_cache+=(--cache-from "$CI_CACHE_ACR_URI/tredev:${{ inputs.DEVCONTAINER_TAG }}")
+            docker_cache+=(--cache-from "$CI_CACHE_ACR_URI/tredev:${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}")
             docker_cache+=(--cache-from "$CI_CACHE_ACR_URI/tredev:latest")
           fi
 
           docker build . "${docker_cache[@]}" \
-            -t "tredev:${{ inputs.DEVCONTAINER_TAG }}" -f ".devcontainer/Dockerfile" \
+            -t "tredev:${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}" -f ".devcontainer/Dockerfile" \
             --build-arg BUILDKIT_INLINE_CACHE=1 --build-arg USER_UID="${USER_UID}" --build-arg USER_GID="${USER_GID}"
 
-          docker image tag tredev:"${{ inputs.DEVCONTAINER_TAG }}" \
-            "$CI_CACHE_ACR_URI/tredev:${{ inputs.DEVCONTAINER_TAG }}"
+          docker image tag tredev:"${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}" \
+            "$CI_CACHE_ACR_URI/tredev:${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}"
 
       - name: Deploy management
         uses: ./.github/actions/devcontainer_run_command
         with:
-          COMMAND: "make bootstrap mgmt-deploy"
           CI_GIT_REF: ${{ inputs.ciGitRef }}
-          DEVCONTAINER_TAG: ${{ inputs.DEVCONTAINER_TAG }}
-          CI_CACHE_ACR_NAME: ${{ secrets.CI_CACHE_ACR_NAME}}
+          COMMAND: "make bootstrap mgmt-deploy"
+          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
+          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          TRE_ID: ${{ secrets.TRE_ID }}
+          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
           LOCATION: ${{ vars.LOCATION }}
-          ACR_NAME: ${{ secrets.ACR_NAME }}
+          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
           TERRAFORM_STATE_CONTAINER_NAME: ${{ vars.TERRAFORM_STATE_CONTAINER_NAME }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ secrets.MGMT_RESOURCE_GROUP_NAME }}
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ secrets.MGMT_STORAGE_ACCOUNT_NAME }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
           ENABLE_CMK_ENCRYPTION: ${{ vars.ENABLE_CMK_ENCRYPTION }}
-          ENCRYPTION_KV_NAME: ${{ secrets.ENCRYPTION_KV_NAME }}
+          ENCRYPTION_KV_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ENCRYPTION_KV_NAME || needs.ci_config.outputs.encryption_kv_name }}
           EXTERNAL_KEY_STORE_ID: ${{ secrets.EXTERNAL_KEY_STORE_ID }}
           PRIVATE_AGENT_SUBNET_ID: ${{ secrets.PRIVATE_AGENT_SUBNET_ID }}
 
@@ -318,7 +347,7 @@ jobs:
         run: |
           # shellcheck disable=SC2034,SC2015,SC2125
           for i in {1..3}; do
-            az acr login --name "${{ secrets.CI_CACHE_ACR_NAME }}" && ec=0 && break || ec="$?" && sleep 10
+            az acr login --name "${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}" && ec=0 && break || ec="$?" && sleep 10
           done
           if [ "$ec" != 0 ]; then
             echo "::error::Failed to login to ACR after 3 attempts. Make sure to run the pipleline on the main branch first."
@@ -327,13 +356,13 @@ jobs:
           (exit "$ec")
 
       - name: Push cached devcontainer
-        run: docker image push ${{ env.CI_CACHE_ACR_URI }}/tredev:${{ inputs.DEVCONTAINER_TAG }}
+        run: docker image push ${{ env.CI_CACHE_ACR_URI }}/tredev:${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
 
   build_core_images:
     # used to build images used by core infrastructure
     name: Build Core Docker Images
     runs-on: ubuntu-latest
-    needs: [deploy_management]
+    needs: [ci_config, deploy_management]
     environment: ${{ inputs.environmentName }}
     strategy:
       fail-fast: true
@@ -357,19 +386,23 @@ jobs:
       - name: Docker build
         uses: ./.github/actions/devcontainer_run_command
         with:
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "make ${{ matrix.target }}"
-          DEVCONTAINER_TAG: ${{ inputs.DEVCONTAINER_TAG }}
-          CI_CACHE_ACR_NAME: ${{ secrets.CI_CACHE_ACR_NAME}}
+          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
+          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          ACR_NAME: ${{ secrets.ACR_NAME }}
+          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
 
   start_tre:
     name: Start TRE
     runs-on: ubuntu-latest
-    needs: [deploy_management]
+    needs: [ci_config, deploy_management]
     environment: ${{ inputs.environmentName }}
     steps:
       - name: Checkout
@@ -383,19 +416,23 @@ jobs:
       - name: Start TRE
         uses: ./.github/actions/devcontainer_run_command
         with:
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "make tre-start"
-          DEVCONTAINER_TAG: ${{ inputs.DEVCONTAINER_TAG }}
-          CI_CACHE_ACR_NAME: ${{ secrets.CI_CACHE_ACR_NAME}}
+          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
+          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          TRE_ID: ${{ secrets.TRE_ID }}
+          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
 
   deploy_tre:
     name: Deploy TRE
     runs-on: ubuntu-latest
-    needs: [build_core_images, start_tre]
+    needs: [ci_config, build_core_images, start_tre]
     environment: ${{ inputs.environmentName }}
     steps:
       - name: Checkout
@@ -409,21 +446,22 @@ jobs:
       - name: Deploy TRE Core
         uses: ./.github/actions/devcontainer_run_command
         with:
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "TF_VAR_ci_git_ref=${{ inputs.ciGitRef }} TF_LOG=${{ vars.TF_LOG }} make deploy-core"
-          DEVCONTAINER_TAG: ${{ inputs.DEVCONTAINER_TAG }}
-          CI_CACHE_ACR_NAME: ${{ secrets.CI_CACHE_ACR_NAME}}
+          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
+          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
           API_CLIENT_ID: "${{ secrets.API_CLIENT_ID }}"
           AAD_TENANT_ID: "${{ secrets.AAD_TENANT_ID }}"
-          TRE_ID: ${{ secrets.TRE_ID }}
+          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
           LOCATION: ${{ vars.LOCATION }}
-          ACR_NAME: ${{ secrets.ACR_NAME }}
+          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
           TERRAFORM_STATE_CONTAINER_NAME: ${{ vars.TERRAFORM_STATE_CONTAINER_NAME }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ secrets.MGMT_RESOURCE_GROUP_NAME }}
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ secrets.MGMT_STORAGE_ACCOUNT_NAME }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
           CORE_ADDRESS_SPACE: ${{ vars.CORE_ADDRESS_SPACE }}
           TRE_ADDRESS_SPACE: ${{ vars.TRE_ADDRESS_SPACE }}
           ENABLE_SWAGGER: ${{ vars.ENABLE_SWAGGER }}
@@ -440,7 +478,7 @@ jobs:
           FIREWALL_SKU: ${{ vars.FIREWALL_SKU}}
           APP_GATEWAY_SKU: ${{ vars.APP_GATEWAY_SKU }}
           ENABLE_CMK_ENCRYPTION: ${{ vars.ENABLE_CMK_ENCRYPTION }}
-          ENCRYPTION_KV_NAME: ${{ secrets.ENCRYPTION_KV_NAME }}
+          ENCRYPTION_KV_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ENCRYPTION_KV_NAME || needs.ci_config.outputs.encryption_kv_name }}
           EXTERNAL_KEY_STORE_ID: ${{ secrets.EXTERNAL_KEY_STORE_ID }}
           USER_MANAGEMENT_ENABLED: ${{ vars.USER_MANAGEMENT_ENABLED }}
           PRIVATE_AGENT_SUBNET_ID: ${{ secrets.PRIVATE_AGENT_SUBNET_ID }}
@@ -452,20 +490,24 @@ jobs:
       - name: API Healthcheck
         uses: ./.github/actions/devcontainer_run_command
         with:
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "make api-healthcheck"
-          DEVCONTAINER_TAG: ${{ inputs.DEVCONTAINER_TAG }}
-          CI_CACHE_ACR_NAME: ${{ secrets.CI_CACHE_ACR_NAME}}
+          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
+          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          TRE_ID: ${{ secrets.TRE_ID }}
+          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
           LOCATION: ${{ vars.LOCATION }}
 
   publish_bundles:
     name: Publish Bundles
     runs-on: ubuntu-latest
-    needs: [deploy_management]
+    needs: [ci_config, deploy_management]
     strategy:
       matrix:
         include:
@@ -514,6 +556,10 @@ jobs:
       - name: Publish bundle
         uses: ./.github/actions/devcontainer_run_command
         with:
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
           # Although porter publish will build automatically, our makefile build target includes logic that should run
           COMMAND: |
             # Loop to retry the make command up to 3 times
@@ -523,18 +569,18 @@ jobs:
 
             # Exit with the last status code
             (exit \$ec)
-          DEVCONTAINER_TAG: ${{ inputs.DEVCONTAINER_TAG }}
+          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          CI_CACHE_ACR_NAME: ${{ secrets.CI_CACHE_ACR_NAME}}
-          ACR_NAME: ${{ secrets.ACR_NAME }}
+          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
+          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
 
   publish_shared_bundles:
     name: Publish Shared Bundles
     runs-on: ubuntu-latest
-    needs: [deploy_management]
+    needs: [ci_config, deploy_management]
     strategy:
       matrix:
         include:
@@ -567,6 +613,10 @@ jobs:
       - name: Publish bundle
         uses: ./.github/actions/devcontainer_run_command
         with:
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
           # Although porter publish will build automatically, our makefile build target includes logic that should run
           COMMAND: |
             # Loop to retry the make command up to 3 times
@@ -576,18 +626,18 @@ jobs:
 
             # Exit with the last status code
             (exit \$ec)
-          DEVCONTAINER_TAG: ${{ inputs.DEVCONTAINER_TAG }}
+          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          CI_CACHE_ACR_NAME: ${{ secrets.CI_CACHE_ACR_NAME}}
-          ACR_NAME: ${{ secrets.ACR_NAME }}
+          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
+          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
 
   register_shared_bundles:
     name: Register Shared Bundles
     runs-on: ubuntu-latest
-    needs: [publish_shared_bundles, deploy_tre]
+    needs: [ci_config, publish_shared_bundles, deploy_tre]
     strategy:
       matrix:
         include:
@@ -619,6 +669,9 @@ jobs:
       - name: Register bundle
         uses: ./.github/actions/devcontainer_run_command
         with:
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: |
             # Loop to retry the make command up to 3 times
             for i in {1..3}; do
@@ -627,26 +680,26 @@ jobs:
 
             # Exit with the last status code
             (exit \$ec)
-          DEVCONTAINER_TAG: ${{ inputs.DEVCONTAINER_TAG }}
-          CI_CACHE_ACR_NAME: ${{ secrets.CI_CACHE_ACR_NAME}}
+          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
+          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          ACR_NAME: ${{ secrets.ACR_NAME }}
+          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
           API_CLIENT_ID: "${{ secrets.API_CLIENT_ID }}"
           AAD_TENANT_ID: "${{ secrets.AAD_TENANT_ID }}"
           TEST_APP_ID: "${{ secrets.TEST_APP_ID }}"
           TEST_ACCOUNT_CLIENT_ID: "${{ secrets.TEST_ACCOUNT_CLIENT_ID }}"
           TEST_ACCOUNT_CLIENT_SECRET: "${{ secrets.TEST_ACCOUNT_CLIENT_SECRET }}"
-          TRE_ID: ${{ secrets.TRE_ID }}
+          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
           LOCATION: ${{ vars.LOCATION }}
           BUNDLE_TYPE: ${{ matrix.BUNDLE_TYPE }}
 
   register_bundles:
     name: Register Bundles
     runs-on: ubuntu-latest
-    needs: [publish_bundles, deploy_tre]
+    needs: [ci_config, publish_bundles, deploy_tre]
     strategy:
       matrix:
         include:
@@ -686,6 +739,9 @@ jobs:
       - name: Register bundle
         uses: ./.github/actions/devcontainer_run_command
         with:
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: |
             # Loop to retry the make command up to 3 times
             for i in {1..3}; do
@@ -694,19 +750,19 @@ jobs:
 
             # Exit with the last status code
             (exit \$ec)
-          DEVCONTAINER_TAG: ${{ inputs.DEVCONTAINER_TAG }}
-          CI_CACHE_ACR_NAME: ${{ secrets.CI_CACHE_ACR_NAME}}
+          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
+          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          ACR_NAME: ${{ secrets.ACR_NAME }}
+          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
           API_CLIENT_ID: "${{ secrets.API_CLIENT_ID }}"
           AAD_TENANT_ID: "${{ secrets.AAD_TENANT_ID }}"
           TEST_APP_ID: "${{ secrets.TEST_APP_ID }}"
           TEST_ACCOUNT_CLIENT_ID: "${{ secrets.TEST_ACCOUNT_CLIENT_ID }}"
           TEST_ACCOUNT_CLIENT_SECRET: "${{ secrets.TEST_ACCOUNT_CLIENT_SECRET }}"
-          TRE_ID: ${{ secrets.TRE_ID }}
+          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
           LOCATION: ${{ vars.LOCATION }}
           BUNDLE_TYPE: ${{ matrix.BUNDLE_TYPE }}
 
@@ -714,7 +770,7 @@ jobs:
     name: Register User Resource Bundles
     runs-on: ubuntu-latest
     # user resource bundles need to wait for their parent resource to be registered.
-    needs: [register_bundles, publish_bundles, deploy_tre]
+    needs: [ci_config, register_bundles, publish_bundles, deploy_tre]
     strategy:
       matrix:
         include:
@@ -742,6 +798,9 @@ jobs:
       - name: Register bundle
         uses: ./.github/actions/devcontainer_run_command
         with:
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: |
             # Loop to retry the make command up to 3 times
             for i in {1..3}; do
@@ -750,19 +809,19 @@ jobs:
 
             # Exit with the last status code
             (exit \$ec)
-          DEVCONTAINER_TAG: ${{ inputs.DEVCONTAINER_TAG }}
-          CI_CACHE_ACR_NAME: ${{ secrets.CI_CACHE_ACR_NAME}}
+          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
+          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
-          ACR_NAME: ${{ secrets.ACR_NAME }}
+          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
           API_CLIENT_ID: "${{ secrets.API_CLIENT_ID }}"
           AAD_TENANT_ID: "${{ secrets.AAD_TENANT_ID }}"
           TEST_APP_ID: "${{ secrets.TEST_APP_ID }}"
           TEST_ACCOUNT_CLIENT_ID: "${{ secrets.TEST_ACCOUNT_CLIENT_ID }}"
           TEST_ACCOUNT_CLIENT_SECRET: "${{ secrets.TEST_ACCOUNT_CLIENT_SECRET }}"
-          TRE_ID: ${{ secrets.TRE_ID }}
+          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
           LOCATION: ${{ vars.LOCATION }}
           BUNDLE_TYPE: ${{ matrix.BUNDLE_TYPE }}
           WORKSPACE_SERVICE_NAME: ${{ matrix.WORKSPACE_SERVICE_NAME }}
@@ -770,7 +829,7 @@ jobs:
   deploy_shared_services:
     name: Deploy shared services
     runs-on: ubuntu-latest
-    needs: [register_shared_bundles, deploy_tre]
+    needs: [ci_config, register_shared_bundles, deploy_tre]
     environment: ${{ inputs.environmentName }}
     steps:
       - name: Checkout
@@ -784,9 +843,13 @@ jobs:
       - name: Deploy firewall
         uses: ./.github/actions/devcontainer_run_command
         with:
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "make deploy-shared-service DIR=./templates/shared_services/firewall/ BUNDLE_TYPE=shared_service"
-          DEVCONTAINER_TAG: ${{ inputs.DEVCONTAINER_TAG }}
-          CI_CACHE_ACR_NAME: ${{ secrets.CI_CACHE_ACR_NAME}}
+          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
+          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
@@ -796,15 +859,17 @@ jobs:
           TEST_APP_ID: "${{ secrets.TEST_APP_ID }}"
           TEST_ACCOUNT_CLIENT_ID: "${{ secrets.TEST_ACCOUNT_CLIENT_ID }}"
           TEST_ACCOUNT_CLIENT_SECRET: "${{ secrets.TEST_ACCOUNT_CLIENT_SECRET }}"
-          TRE_ID: ${{ secrets.TRE_ID }}
+          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
           LOCATION: ${{ vars.LOCATION }}
 
       - name: State Store Migrations
         uses: ./.github/actions/devcontainer_run_command
         with:
+          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "make db-migrate"
-          DEVCONTAINER_TAG: ${{ inputs.DEVCONTAINER_TAG }}
-          CI_CACHE_ACR_NAME: ${{ secrets.CI_CACHE_ACR_NAME}}
+          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
+          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
@@ -814,16 +879,16 @@ jobs:
           TEST_APP_ID: "${{ secrets.TEST_APP_ID }}"
           TEST_ACCOUNT_CLIENT_ID: "${{ secrets.TEST_ACCOUNT_CLIENT_ID }}"
           TEST_ACCOUNT_CLIENT_SECRET: "${{ secrets.TEST_ACCOUNT_CLIENT_SECRET }}"
-          TRE_ID: ${{ secrets.TRE_ID }}
+          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
           LOCATION: ${{ vars.LOCATION }}
           TERRAFORM_STATE_CONTAINER_NAME: ${{ vars.TERRAFORM_STATE_CONTAINER_NAME }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ secrets.MGMT_RESOURCE_GROUP_NAME }}
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ secrets.MGMT_STORAGE_ACCOUNT_NAME }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
 
   deploy_ui:
     name: Deploy UI
     runs-on: ubuntu-latest
-    needs: [deploy_tre]
+    needs: [ci_config, deploy_tre]
     environment: ${{ inputs.environmentName }}
     steps:
       - name: Checkout
@@ -836,20 +901,22 @@ jobs:
       - name: Deploy UI
         uses: ./.github/actions/devcontainer_run_command
         with:
+          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "make build-and-deploy-ui"
-          DEVCONTAINER_TAG: ${{ inputs.DEVCONTAINER_TAG }}
-          CI_CACHE_ACR_NAME: ${{ secrets.CI_CACHE_ACR_NAME}}
+          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
+          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT }}
           API_CLIENT_ID: "${{ secrets.API_CLIENT_ID }}"
           AAD_TENANT_ID: "${{ secrets.AAD_TENANT_ID }}"
-          TRE_ID: ${{ secrets.TRE_ID }}
+          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
           LOCATION: ${{ vars.LOCATION }}
           TERRAFORM_STATE_CONTAINER_NAME: ${{ vars.TERRAFORM_STATE_CONTAINER_NAME }}
-          MGMT_RESOURCE_GROUP_NAME: ${{ secrets.MGMT_RESOURCE_GROUP_NAME }}
-          MGMT_STORAGE_ACCOUNT_NAME: ${{ secrets.MGMT_STORAGE_ACCOUNT_NAME }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
           SWAGGER_UI_CLIENT_ID: "${{ secrets.SWAGGER_UI_CLIENT_ID }}"
           USER_MANAGEMENT_ENABLED: ${{ vars.USER_MANAGEMENT_ENABLED }}
           UI_SITE_NAME: "${{ inputs.UI_SITE_NAME || vars.UI_SITE_NAME }}"
@@ -860,13 +927,13 @@ jobs:
     # When skipDeployment is true, the deploy jobs in needs are intentionally skipped.
     # always() lets this job still evaluate its guard and run against the existing PR environment.
     if: >-
-      ${{ always() &&
+      ${{ always() && needs.ci_config.result == 'success' &&
       (inputs.skipDeployment || !contains(needs.*.result, 'skipped')) &&
       !contains(needs.*.result, 'failure') &&
       !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environmentName }}
-    needs: [deploy_shared_services, register_bundles, deploy_ui]
+    needs: [ci_config, deploy_shared_services, register_bundles, deploy_ui]
     timeout-minutes: 10
     steps:
       - name: Checkout
@@ -880,9 +947,13 @@ jobs:
       - name: Run E2E Tests (Smoke)
         uses: ./.github/actions/devcontainer_run_command
         with:
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "make test-e2e-smoke"
-          DEVCONTAINER_TAG: ${{ inputs.DEVCONTAINER_TAG }}
-          CI_CACHE_ACR_NAME: ${{ secrets.CI_CACHE_ACR_NAME}}
+          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
+          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
@@ -895,7 +966,7 @@ jobs:
           TEST_WORKSPACE_APP_SECRET: "${{ secrets.TEST_WORKSPACE_APP_SECRET }}"
           TEST_ACCOUNT_CLIENT_ID: "${{ secrets.TEST_ACCOUNT_CLIENT_ID }}"
           TEST_ACCOUNT_CLIENT_SECRET: "${{ secrets.TEST_ACCOUNT_CLIENT_SECRET }}"
-          TRE_ID: ${{ secrets.TRE_ID }}
+          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
           IS_API_SECURED: false
           WORKSPACE_APP_SERVICE_PLAN_SKU: ${{ vars.WORKSPACE_APP_SERVICE_PLAN_SKU }}
 
@@ -910,14 +981,14 @@ jobs:
     name: "Run E2E Tests"
     # Same as smoke tests: skipDeployment intentionally bypasses deploy jobs but still runs E2E tests.
     if: >-
-      ${{ always() && inputs.e2eTestsCustomSelector != '' &&
+      ${{ always() && needs.ci_config.result == 'success' && inputs.e2eTestsCustomSelector != '' &&
       (inputs.skipDeployment || !contains(needs.*.result, 'skipped')) &&
       !contains(needs.*.result, 'failure') &&
       !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environmentName }}
     needs:
-      [deploy_shared_services, register_bundles, register_user_resource_bundles]
+      [ci_config, deploy_shared_services, register_bundles, register_user_resource_bundles]
     timeout-minutes: 300
     steps:
       - name: Checkout
@@ -931,9 +1002,13 @@ jobs:
       - name: Run E2E Tests
         uses: ./.github/actions/devcontainer_run_command
         with:
+          MGMT_STORAGE_ACCOUNT_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || needs.ci_config.outputs.mgmt_storage_account_name }}
+          MGMT_RESOURCE_GROUP_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || needs.ci_config.outputs.mgmt_resource_group_name }}
+          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || needs.ci_config.outputs.acr_name }}
+          CI_GIT_REF: ${{ inputs.ciGitRef }}
           COMMAND: "TEST_ACCEPT_NEXUS_EULA=${{ inputs.acceptNexusEula }} make test-e2e-custom SELECTOR='${{ inputs.e2eTestsCustomSelector }}'"
-          DEVCONTAINER_TAG: ${{ inputs.DEVCONTAINER_TAG }}
-          CI_CACHE_ACR_NAME: ${{ secrets.CI_CACHE_ACR_NAME}}
+          DEVCONTAINER_TAG: ${{ vars.CI_NAMESPACE == '' && inputs.DEVCONTAINER_TAG || needs.ci_config.outputs.devcontainer_tag }}
+          CI_CACHE_ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.CI_CACHE_ACR_NAME || needs.ci_config.outputs.acr_name }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
@@ -946,7 +1021,7 @@ jobs:
           TEST_WORKSPACE_APP_SECRET: "${{ secrets.TEST_WORKSPACE_APP_SECRET }}"
           TEST_ACCOUNT_CLIENT_ID: "${{ secrets.TEST_ACCOUNT_CLIENT_ID }}"
           TEST_ACCOUNT_CLIENT_SECRET: "${{ secrets.TEST_ACCOUNT_CLIENT_SECRET }}"
-          TRE_ID: ${{ secrets.TRE_ID }}
+          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || needs.ci_config.outputs.tre_id }}
           IS_API_SECURED: false
           WORKSPACE_APP_SERVICE_PLAN_SKU: ${{ vars.WORKSPACE_APP_SERVICE_PLAN_SKU }}
           E2E_TESTS_NUMBER_PROCESSES: ${{ inputs.E2E_TESTS_NUMBER_PROCESSES }}
@@ -960,7 +1035,7 @@ jobs:
 
   summary:
     name: Summary
-    needs: [e2e_tests_smoke, e2e_tests_custom]
+    needs: [ci_config, e2e_tests_smoke, e2e_tests_custom]
     runs-on: ubuntu-latest
     permissions:
       checks: write

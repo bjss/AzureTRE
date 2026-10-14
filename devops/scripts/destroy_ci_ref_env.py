@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 
+from ci_repository_scope import group_pattern, owns
 from ci_environment_id import validate_ref
 
 
@@ -36,7 +37,11 @@ def targets(groups, ref, subscription):
         inventory[group["name"].lower()] = group
     selected = set()
     for name, group in inventory.items():
-        if not re.fullmatch(r"rg-tre[0-9a-f]{8}(-mgmt)?", name) or (group.get("tags") or {}).get("ci_git_ref") != ref:
+        if (
+            not re.fullmatch(group_pattern(), name)
+            or not owns(group.get("tags"))
+            or (group.get("tags") or {}).get("ci_git_ref") != ref
+        ):
             continue
         core = name.removesuffix("-mgmt")
         for sibling in (core, core + "-mgmt"):
@@ -45,7 +50,7 @@ def targets(groups, ref, subscription):
                 expected = f"/subscriptions/{subscription}/resourceGroups/{sibling}"
                 if not isinstance(value.get("id"), str) or value["id"].lower() != expected.lower():
                     raise ValueError("The CI resource group identity does not match.")
-                if (value.get("tags") or {}).get("ci_git_ref") != ref:
+                if not owns(value.get("tags")) or (value.get("tags") or {}).get("ci_git_ref") != ref:
                     raise ValueError("Core and management group ownership differs. Cleanup stopped.")
         selected.add(core)
     return sorted(selected)

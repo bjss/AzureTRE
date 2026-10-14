@@ -41,13 +41,16 @@ on: # yamllint disable-line rule:truthy
 permissions:
   contents: read
 
+env:
+  CI_NAMESPACE: ${{ vars.CI_NAMESPACE }}
+
 jobs:
   prepare-not-main:
     name: Preparation
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     if: |
-      github.ref != 'refs/heads/main'
+      github.ref != 'refs/heads/main' && (vars.CI_NAMESPACE == '' || vars.CI_DEPLOYMENTS_ENABLED == 'true')
     outputs:
       refid: ${{ steps.run-id.outputs.refid }}
     permissions:
@@ -79,7 +82,7 @@ jobs:
 
   run-deploy-tre-not-main:
     name: "Deploy PR"
-    if: ${{ github.ref != 'refs/heads/main' }}
+    if: ${{ github.ref != 'refs/heads/main' && (vars.CI_NAMESPACE == '' || vars.CI_DEPLOYMENTS_ENABLED == 'true') }}
     needs: [prepare-not-main]
     uses: ./.github/workflows/deploy_tre_reusable.yml
     permissions:

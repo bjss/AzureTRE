@@ -15,19 +15,24 @@ on: # yamllint disable-line rule:truthy
 
 # This will prevent multiple runs of this entire workflow.
 # We should NOT cancel in progress runs as that can destabilize the environment.
-concurrency: letsencrypt
+concurrency:
+  group: ${{ vars.CI_NAMESPACE != '' && 'deploy-refs/heads/main' || 'letsencrypt' }}
+  cancel-in-progress: false
+  queue: max
 
 permissions:
   id-token: write
   contents: read
 
 env:
+  CI_NAMESPACE: ${{ vars.CI_NAMESPACE }}
   USE_ENV_VARS_NOT_FILES: true
   TF_INPUT: 0 # interactive is off
   TF_IN_AUTOMATION: 1 # Run in headless mode
 
 jobs:
   renew_letsencrypt_certs:
+    if: ${{ vars.CI_NAMESPACE == '' || (vars.CI_DEPLOYMENTS_ENABLED == 'true' && vars.CI_MAIN_ENABLED == 'true') }}
     name: Renew Lets Encrypt Certificates
     runs-on: ubuntu-latest
     environment: ${{ github.event.inputs.environment || 'CICD' }}
@@ -36,6 +41,14 @@ jobs:
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
           persist-credentials: false
+
+      - name: Resolve main CI names
+        id: names
+        env:
+          CI_GIT_REF: refs/heads/main
+          CI_LOCATION: ${{ vars.LOCATION }}
+          CI_AZURE_ENVIRONMENT: ${{ vars.AZURE_ENVIRONMENT || 'AzureCloud' }}
+        run: python3 devops/scripts/ci_repository_scope.py resolve
 
       - name: Install specific Azure CLI version
         run: |
@@ -67,10 +80,13 @@ jobs:
           ARM_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           ARM_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
           AZURE_ENVIRONMENT: ${{ (vars.AZURE_ENVIRONMENT != '' && vars.AZURE_ENVIRONMENT) || 'AzureCloud' }}
-          TRE_ID: ${{ secrets.TRE_ID }}
+          LOCATION: ${{ vars.LOCATION }}
+          TF_VAR_ci_git_ref: refs/heads/main
+          ACR_NAME: ${{ vars.CI_NAMESPACE == '' && secrets.ACR_NAME || steps.names.outputs.acr_name }}
+          TRE_ID: ${{ vars.CI_NAMESPACE == '' && secrets.TRE_ID || steps.names.outputs.tre_id }}
           TF_VAR_terraform_state_container_name: ${{ secrets.TERRAFORM_STATE_CONTAINER_NAME || 'tfstate' }}
-          TF_VAR_mgmt_resource_group_name: ${{ secrets.MGMT_RESOURCE_GROUP_NAME }}
-          TF_VAR_mgmt_storage_account_name: ${{ secrets.MGMT_STORAGE_ACCOUNT_NAME }}
+          TF_VAR_mgmt_resource_group_name: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_RESOURCE_GROUP_NAME || steps.names.outputs.mgmt_resource_group_name }}
+          TF_VAR_mgmt_storage_account_name: ${{ vars.CI_NAMESPACE == '' && secrets.MGMT_STORAGE_ACCOUNT_NAME || steps.names.outputs.mgmt_storage_account_name }}
           CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN }}
           PRIVATE_AGENT_SUBNET_ID: ${{ secrets.PRIVATE_AGENT_SUBNET_ID }}
         run: |

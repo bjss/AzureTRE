@@ -10,6 +10,9 @@ if [[ -z ${TRE_ID:-} ]]; then
 fi
 
 core_rg_name="rg-${TRE_ID}"
+if [[ -n "${CI_NAMESPACE:-}" ]]; then
+  python3 "$(dirname "${BASH_SOURCE[0]}")/ci_repository_scope.py" verify-destroy --group "$core_rg_name"
+fi
 fw_name="fw-${TRE_ID}"
 agw_name="agw-$TRE_ID"
 fw_pip_name="pip-${fw_name}"

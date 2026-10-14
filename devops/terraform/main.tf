@@ -14,7 +14,7 @@ resource "azurerm_resource_group" "mgmt" {
   tags = merge({
     project = "Azure Trusted Research Environment"
     source  = "https://github.com/microsoft/AzureTRE/"
-  }, var.ci_git_ref != "" ? { ci_git_ref = var.ci_git_ref } : {})
+  }, var.ci_git_ref != "" ? { ci_git_ref = var.ci_git_ref } : {}, var.ci_namespace != "" ? { ci_namespace = var.ci_namespace, ci_repository_id = var.ci_repository_id } : {})
 
   lifecycle { ignore_changes = [tags] }
 }

@@ -64,5 +64,9 @@ load_environment_config
 ensure_automation_login
 set_account_context
 
+if [[ -n "${CI_NAMESPACE:-}" ]]; then
+  python3 "${SCRIPT_DIR}/ci_repository_scope.py" verify-deployment
+fi
+
 # Ensure nounset is restored to avoid affecting caller
 set +o nounset

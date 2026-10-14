@@ -37,12 +37,17 @@ function destroyEnv ()
 python3 devops/scripts/ci_cleanup_scope.py verify-lock
 
 if [[ "${CI_CLEANUP_REF}" == refs/heads/main ]]; then
+  if [[ -n "${CI_NAMESPACE:-}" ]]; then
+    echo "Namespaced main environments are persistent. Skipping workspace cleanup."
+    exit 0
+  fi
   # The TRE_ID secret can be absent for cleanup. The previous sweep then matched nothing.
   if [[ -z "${MAIN_TRE_ID:-}" ]]; then
     echo "MAIN_TRE_ID is not set. Skipping main workspace cleanup."
     exit 0
   fi
   [[ "${MAIN_TRE_ID}" =~ ^[a-zA-Z0-9-]+$ ]] || { echo "Invalid main TRE ID" >&2; exit 1; }
+  python3 devops/scripts/ci_repository_scope.py verify-legacy-main
   workspace_groups=$(az group list --query "[?starts_with(name, 'rg-${MAIN_TRE_ID}-ws-')].name" -o tsv)
   # Workspace groups are independent. Delete them in parallel, but keep the
   # reference lock until every deletion has finished.
@@ -79,13 +84,15 @@ open_prs=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls?state=open&per_pa
 # Take a snapshot before deletion. A paired management group is handled through its
 # core group, even if the core group disappears during this sweep. Untagged groups
 # are never independent cleanup targets, including legacy management orphans.
-resource_groups=$(az group list --query "[?starts_with(name, 'rg-tre')].{name:name, ci_git_ref:tags.ci_git_ref}" -o json)
-cleanup_groups=$(jq -rs '
+resource_groups=$(az group list --query "[?starts_with(name, 'rg-${CI_NAMESPACE:-tre}')].{name:name, ci_git_ref:tags.ci_git_ref, ci_namespace:tags.ci_namespace, ci_repository_id:tags.ci_repository_id}" -o json)
+cleanup_groups=$(jq -rs --arg namespace "${CI_NAMESPACE:-}" --arg repository_id "${GITHUB_REPOSITORY_ID:-}" '
   if length != 1 then error("Expected one resource group list") else .[0] end |
   if type != "array" then error("Invalid resource group list")
   elif any(.[]; (.name | type) != "string" or (.ci_git_ref != null and (.ci_git_ref | type) != "string")) then
     error("Invalid resource group details")
   else . as $groups | .[]
+    | select(if $namespace == "" then .ci_namespace == null and .ci_repository_id == null
+        else .ci_namespace == $namespace and .ci_repository_id == $repository_id end)
     | select((.ci_git_ref // "") | test("^refs/(pull/[0-9]+/merge|heads/.+)$"))
     | .name as $name
     | select(($name | endswith("-mgmt") | not) or

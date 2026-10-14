@@ -24,6 +24,10 @@ check_role_assignments() {
   return 1
 }
 
+if [[ -n "${CI_NAMESPACE:-}" ]]; then
+  python3 ../scripts/ci_repository_scope.py verify-deployment
+fi
+
 # Baseline Azure resources
 echo -e "\n\e[34m»»» 🤖 \e[96mCreating resource group and storage account\e[0m..."
 # shellcheck disable=SC2154
@@ -42,7 +46,10 @@ case "$group_exists" in
     ;;
   false)
     # Tag new CI groups before any later bootstrap step can fail.
-    if [[ -n "${TF_VAR_ci_git_ref:-}" ]]; then
+    if [[ -n "${CI_NAMESPACE:-}" ]]; then
+      az group create --resource-group "$TF_VAR_mgmt_resource_group_name" --location "$LOCATION" \
+        --tags "ci_git_ref=$TF_VAR_ci_git_ref" "ci_namespace=$CI_NAMESPACE" "ci_repository_id=$GITHUB_REPOSITORY_ID" -o table
+    elif [[ -n "${TF_VAR_ci_git_ref:-}" ]]; then
       az group create --resource-group "$TF_VAR_mgmt_resource_group_name" --location "$LOCATION" \
         --tags "ci_git_ref=$TF_VAR_ci_git_ref" -o table
     else

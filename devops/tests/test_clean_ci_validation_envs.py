@@ -75,6 +75,7 @@ elif command == "az":
                 sys.exit(0)
             print(json.dumps([{
                 "name": row.split("\t")[0],
+                **config.get("ownership", {}).get(row.split("\t")[0], {}),
                 "ci_git_ref": row.split("\t")[1] if "\t" in row else None,
             } for row in config["groups"]]))
         elif config.get("real_destroy") and query.endswith(".[name]"):
@@ -232,6 +233,30 @@ class CleanupTests(unittest.TestCase):
                 for call in self.calls
             ),
             self.calls,
+        )
+
+    def test_legacy_sweep_excludes_namespaced_and_partial_markers(self):
+        self.config.update(
+            groups=["rg-tretest\trefs/pull/5085/merge"], open_prs=[], ownership={"rg-tretest": {"ci_namespace": "cgi"}}
+        )
+        result = self.run_cleanup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.environment_actions(), [])
+
+    def test_namespaced_sweep_only_selects_matching_repository(self):
+        self.env.update(CI_NAMESPACE="cgi", GITHUB_REPOSITORY_ID="123")
+        self.config.update(
+            groups=["rg-cgi12345678\trefs/pull/5085/merge", "rg-cgi87654321\trefs/pull/5085/merge"],
+            open_prs=[],
+            ownership={
+                "rg-cgi12345678": {"ci_namespace": "cgi", "ci_repository_id": "123"},
+                "rg-cgi87654321": {"ci_namespace": "cgi", "ci_repository_id": "456"},
+            },
+        )
+        result = self.run_cleanup()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.environment_actions(), [["destroy_env_no_terraform.sh", "--core-tre-rg", "rg-cgi12345678"]]
         )
 
     def test_missing_or_unverified_concurrency_refuses_all_cleanup(self):

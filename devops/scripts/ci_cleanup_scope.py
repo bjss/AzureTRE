@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 
+from ci_repository_scope import group_pattern, owns, settings
 from ci_environment_id import validate_ref
 from recover_bootstrap_lease import RecoveryError, github, require, verify_concurrency
 
@@ -49,14 +50,14 @@ def inventory():
             "Inconsistent cleanup resource group identity.",
         )
         require(group.get("tags") is None or isinstance(group.get("tags"), dict), "Invalid cleanup ownership tags.")
-        result[name] = (group.get("tags") or {}).get("ci_git_ref")
+        result[name] = (group.get("tags") or {}).get("ci_git_ref") if owns(group.get("tags")) else None
     return result
 
 
 def references(groups):
     refs = {"refs/heads/main"}
     for name, ref in groups.items():
-        if not name.startswith("rg-tre") or ref is None:
+        if not name.startswith("rg-" + (settings()[0] or "tre")) or ref is None:
             continue
         require(isinstance(ref, str), "Invalid CI ownership reference.")
         if not ref.startswith(("refs/heads/", "refs/pull/")):
@@ -129,7 +130,8 @@ def verify_lock(ctx):
 
 def verify_target(groups, ref, group):
     require(
-        ref != "refs/heads/main" and re.fullmatch(r"rg-tre[a-z0-9-]+(?:-mgmt)?", group),
+        ref != "refs/heads/main"
+        and re.fullmatch(group_pattern() if settings()[0] else r"rg-tre[a-z0-9-]+(?:-mgmt)?", group),
         "Invalid isolated cleanup target.",
     )
     core = group.removesuffix("-mgmt")
@@ -146,6 +148,7 @@ def main():
     parser.add_argument("--group")
     args = parser.parse_args()
     try:
+        settings()
         if args.operation == "plan":
             print(json.dumps(references(inventory()), separators=(",", ":")))
         else:

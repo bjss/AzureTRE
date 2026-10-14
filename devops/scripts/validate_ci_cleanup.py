@@ -14,7 +14,7 @@ import uuid
 
 SOURCE = Path(__file__).resolve().parents[2]
 OWNER_TAG = "cleanup_validation_run"
-DISCOVERY = "[?starts_with(name, 'rg-tre')].{name:name, ci_git_ref:tags.ci_git_ref}"
+DISCOVERY = "[?starts_with(name, 'rg-tre')].{name:name, ci_git_ref:tags.ci_git_ref, ci_namespace:tags.ci_namespace, ci_repository_id:tags.ci_repository_id}"
 STORAGE_NAME = "validationnevercreated"
 
 

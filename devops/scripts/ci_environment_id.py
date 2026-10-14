@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 
 
@@ -15,8 +16,15 @@ def validate_ref(ref):
         raise ValueError("The CI Git reference is invalid.")
 
 
-def environment_id(ref, location, cloud="AzureCloud"):
-    validate_ref(ref)
+def environment_id(ref, location, cloud="AzureCloud", namespace="", repository_id=""):
+    if not (namespace and ref == "refs/heads/main"):
+        validate_ref(ref)
+    if namespace and (
+        not re.fullmatch(r"[a-z]{2,3}", namespace)
+        or namespace == "tre"
+        or not re.fullmatch(r"[1-9][0-9]*", repository_id)
+    ):
+        raise ValueError("Invalid CI namespace or repository ID.")
     location = location.replace(" ", "").lower()
     if not re.fullmatch(r"[a-z][a-z0-9]+", location):
         raise ValueError("The CI Azure location is missing or invalid.")
@@ -24,6 +32,8 @@ def environment_id(ref, location, cloud="AzureCloud"):
     if cloud not in ("azurecloud", "azureusgovernment", "azurechinacloud", "azuregermancloud"):
         raise ValueError("The CI Azure cloud is invalid.")
     identity = json.dumps(["AzureTRE-CI-v1", ref, cloud, location], separators=(",", ":"), ensure_ascii=True)
+    if namespace:
+        identity = json.dumps(["AzureTRE-CI-v2", namespace, repository_id, ref, cloud, location], separators=(",", ":"))
     return hashlib.sha512(identity.encode()).hexdigest()[:8]
 
 
@@ -34,7 +44,15 @@ def main():
     parser.add_argument("--cloud", default="AzureCloud")
     args = parser.parse_args()
     try:
-        print(environment_id(args.ref, args.location, args.cloud))
+        print(
+            environment_id(
+                args.ref,
+                args.location,
+                args.cloud,
+                os.environ.get("CI_NAMESPACE", ""),
+                os.environ.get("GITHUB_REPOSITORY_ID", ""),
+            )
+        )
     except ValueError as error:
         parser.error(str(error))
 

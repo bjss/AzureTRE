@@ -10,6 +10,9 @@ on: # yamllint disable-line rule:truthy
 permissions:
   contents: read
 
+env:
+  CI_NAMESPACE: ${{ vars.CI_NAMESPACE }}
+
 jobs:
   pr_comment:
     name: PR comment
@@ -76,7 +79,7 @@ jobs:
 
   destroy_pr_env:
     needs: [pr_comment]
-    if: ${{ needs.pr_comment.outputs.command == 'test-destroy-env' }}
+    if: ${{ (vars.CI_NAMESPACE == '' || vars.CI_CLEANUP_ENABLED == 'true') && (needs.pr_comment.outputs.command == 'test-destroy-env') }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -121,7 +124,7 @@ jobs:
 
   destroy_branch_env:
     needs: [pr_comment]
-    if: ${{ needs.pr_comment.outputs.command == 'test-destroy-env' && needs.pr_comment.outputs.branchCiGitRef != '' }}
+    if: ${{ (vars.CI_NAMESPACE == '' || vars.CI_CLEANUP_ENABLED == 'true') && (needs.pr_comment.outputs.command == 'test-destroy-env' && needs.pr_comment.outputs.branchCiGitRef != '') }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -167,7 +170,7 @@ jobs:
   prepare_pr_env:
     name: Prepare PR environment
     needs: [pr_comment]
-    if: ${{ startsWith(needs.pr_comment.outputs.command, 'run-tests') }}
+    if: ${{ (vars.CI_NAMESPACE == '' || vars.CI_DEPLOYMENTS_ENABLED == 'true') && (startsWith(needs.pr_comment.outputs.command, 'run-tests')) }}
     runs-on: ubuntu-latest
     environment: CICD
     outputs:
@@ -187,19 +190,20 @@ jobs:
           set -euo pipefail
           refid=$(python3 devops/scripts/ci_environment_id.py \
             --ref "$CI_GIT_REF" --location "$CI_LOCATION" --cloud "$CI_AZURE_ENVIRONMENT")
-          echo "CI environment tre${refid} in ${CI_LOCATION} (${CI_AZURE_ENVIRONMENT})"
+          echo "CI environment ${CI_NAMESPACE:-tre}${refid} in ${CI_LOCATION} (${CI_AZURE_ENVIRONMENT})"
           echo "refid=$refid" >> "$GITHUB_OUTPUT"
 
   run_test:
     # Run the tests with the re-usable workflow
     needs: [pr_comment, prepare_pr_env]
-    if: |
-      needs.pr_comment.outputs.command == 'run-tests' ||
+    if: >-
+      ${{ (vars.CI_NAMESPACE == '' || vars.CI_DEPLOYMENTS_ENABLED == 'true') &&
+      (needs.pr_comment.outputs.command == 'run-tests' ||
       needs.pr_comment.outputs.command == 'run-tests-extended' ||
       needs.pr_comment.outputs.command == 'run-tests-extended-aad' ||
       needs.pr_comment.outputs.command == 'run-tests-shared-services' ||
       needs.pr_comment.outputs.command == 'run-tests-backups' ||
-      needs.pr_comment.outputs.command == 'run-tests-airlock'
+      needs.pr_comment.outputs.command == 'run-tests-airlock') }}
     name: Deploy PR
     uses: ./.github/workflows/deploy_tre_reusable.yml
     permissions:

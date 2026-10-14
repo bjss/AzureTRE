@@ -67,6 +67,10 @@ fi
 
 script_dir=$(realpath "$(dirname "${BASH_SOURCE[0]}")")
 
+if [[ -n "${CI_NAMESPACE:-}" ]]; then
+  python3 "$script_dir/ci_repository_scope.py" verify-destroy --group "$core_tre_rg"
+fi
+
 # shellcheck disable=SC1091
 source "$script_dir/kv_add_network_exception.sh"
 
